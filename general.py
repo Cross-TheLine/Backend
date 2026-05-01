@@ -87,19 +87,27 @@ def validate(model, val_loader, device, epoch, min_dist=5):
     return np.mean(losses), precision, recall, f1
 
 
-def postprocess(feature_map, scale=2):
-    feature_map *= 255
-    feature_map = feature_map.reshape((360, 640))
-    feature_map = feature_map.astype(np.uint8)
-    ret, heatmap = cv2.threshold(feature_map, 127, 255, cv2.THRESH_BINARY)
-    circles = cv2.HoughCircles(heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=1, param1=50, param2=2, minRadius=2,
-                               maxRadius=7)
-    x,y = None, None
-    if circles is not None:
-        if len(circles) == 1:
-            x = circles[0][0][0]*scale
-            y = circles[0][0][1]*scale
-    return x, y
+def postprocess(feature_map, scale=2, peak_threshold=80, blur_size=5, centroid_radius=2):
+    feature_map = feature_map.reshape((360, 640)).astype(np.float32)
+    heatmap = cv2.GaussianBlur(feature_map, (blur_size, blur_size), 0)
+    max_value = float(heatmap.max())
+    if max_value < peak_threshold:
+        return None, None
+
+    y_idx, x_idx = np.unravel_index(np.argmax(heatmap), heatmap.shape)
+
+    x_min = max(0, x_idx - centroid_radius)
+    x_max = min(heatmap.shape[1], x_idx + centroid_radius + 1)
+    y_min = max(0, y_idx - centroid_radius)
+    y_max = min(heatmap.shape[0], y_idx + centroid_radius + 1)
+    patch = heatmap[y_min:y_max, x_min:x_max]
+
+    if patch.sum() > 0:
+        ys, xs = np.mgrid[y_min:y_max, x_min:x_max]
+        x_idx = float((patch * xs).sum() / patch.sum())
+        y_idx = float((patch * ys).sum() / patch.sum())
+
+    return x_idx * scale, y_idx * scale
 
 
 

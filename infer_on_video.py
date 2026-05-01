@@ -8,6 +8,8 @@ import argparse
 from itertools import groupby
 from scipy.spatial import distance
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 def read_video(path_video):
     """ Read video file    
     :params
@@ -131,6 +133,32 @@ def interpolation(coords):
     track = [*zip(x,y)]
     return track
 
+def smooth_track(ball_track, window_size=3):
+    """Smooth contiguous valid track segments with a centered moving average."""
+    if window_size < 3 or window_size % 2 == 0:
+        return ball_track
+
+    smoothed_track = list(ball_track)
+    segment_start = None
+    for idx, point in enumerate(ball_track + [(None, None)]):
+        is_valid = point[0] is not None and point[1] is not None
+        if is_valid and segment_start is None:
+            segment_start = idx
+        if not is_valid and segment_start is not None:
+            segment = ball_track[segment_start:idx]
+            if len(segment) >= window_size:
+                x_vals = np.array([p[0] for p in segment], dtype=np.float32)
+                y_vals = np.array([p[1] for p in segment], dtype=np.float32)
+                kernel = np.ones(window_size, dtype=np.float32) / window_size
+                x_pad = np.pad(x_vals, (window_size // 2, window_size // 2), mode='edge')
+                y_pad = np.pad(y_vals, (window_size // 2, window_size // 2), mode='edge')
+                x_smooth = np.convolve(x_pad, kernel, mode='valid')
+                y_smooth = np.convolve(y_pad, kernel, mode='valid')
+                for offset in range(len(segment)):
+                    smoothed_track[segment_start + offset] = (float(x_smooth[offset]), float(y_smooth[offset]))
+            segment_start = None
+    return smoothed_track
+
 def write_track(frames, ball_track, path_output_video, fps, trace=7):
     """ Write .avi file with detected ball tracks
     :params
@@ -164,10 +192,15 @@ if __name__ == '__main__':
     parser.add_argument('--video_path', type=str, help='path to input video')
     parser.add_argument('--video_out_path', type=str, help='path to output video')
     parser.add_argument('--extrapolation', action='store_true', help='whether to use ball track extrapolation')
+    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'cpu'],
+                        help='device to use for inference')
     args = parser.parse_args()
     
     model = BallTrackerNet()
-    device = 'cuda'
+    if args.device == 'auto':
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    else:
+        device = args.device
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model = model.to(device)
     model.eval()
@@ -182,6 +215,7 @@ if __name__ == '__main__':
             ball_subtrack = ball_track[r[0]:r[1]]
             ball_subtrack = interpolation(ball_subtrack)
             ball_track[r[0]:r[1]] = ball_subtrack
+    ball_track = smooth_track(ball_track)
         
     write_track(frames, ball_track, args.video_out_path, fps)    
     

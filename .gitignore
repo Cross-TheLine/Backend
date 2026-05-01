@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+
+datasets/
+downloads/
+weights/
+
+*.mp4
+*.avi
+*.csv
+
+*.pt
+*.cbm

@@ -16,6 +16,9 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1.0, help='learning rate')
     parser.add_argument('--val_intervals', type=int, default=5, help='number of epochs to run validation')
     parser.add_argument('--steps_per_epoch', type=int, default=200, help='number of steps per one epoch')
+    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'cpu'],
+                        help='device to use for training')
+    parser.add_argument('--num_workers', type=int, default=0, help='number of dataloader workers')
     args = parser.parse_args()
     
     train_dataset = trackNetDataset('train')
@@ -23,7 +26,7 @@ if __name__ == '__main__':
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=1,
+        num_workers=args.num_workers,
         pin_memory=True
     )
     
@@ -32,12 +35,15 @@ if __name__ == '__main__':
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=1,
+        num_workers=args.num_workers,
         pin_memory=True
     )    
     
     model = BallTrackerNet()
-    device = 'cuda'
+    if args.device == 'auto':
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    else:
+        device = args.device
     model = model.to(device)
     
     exps_path = './exps/{}'.format(args.exp_id)

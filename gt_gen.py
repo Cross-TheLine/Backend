@@ -49,7 +49,7 @@ def create_gt_images(path_input, path_output, size, variance, width, height):
                 cv2.imwrite(os.path.join(path_out_clip, file_name), heatmap) 
                 
 def create_gt_labels(path_input, path_output, train_rate=0.7):
-    df = pd.DataFrame()
+    frames = []
     for game_id in range(1,11):
         game = 'game{}'.format(game_id)
         clips = os.listdir(os.path.join(path_input, game))
@@ -57,10 +57,11 @@ def create_gt_labels(path_input, path_output, train_rate=0.7):
             labels = pd.read_csv(os.path.join(path_input, game, clip, 'Label.csv'))
             labels['gt_path'] = 'gts/' + game + '/' + clip + '/' + labels['file name']
             labels['path1'] = 'images/' + game + '/' + clip + '/' + labels['file name']
-            labels_target = labels[2:]
+            labels_target = labels.iloc[2:].copy()
             labels_target.loc[:, 'path2'] = list(labels['path1'][1:-1])
             labels_target.loc[:, 'path3'] = list(labels['path1'][:-2])
-            df = df.append(labels_target)
+            frames.append(labels_target)
+    df = pd.concat(frames, ignore_index=True)
     df = df.reset_index(drop=True) 
     df = df[['path1', 'path2', 'path3', 'gt_path', 'x-coordinate', 'y-coordinate', 'status', 'visibility']]
     df = df.sample(frac=1)
