@@ -488,7 +488,7 @@ def main() -> None:
     parser.add_argument("--input", required=True, help="Path to the input image.")
     parser.add_argument("--out-dir", default="line_detection_output", help="Directory for result images and JSON.")
     parser.add_argument("--use-roboflow-roi", action="store_true")
-    parser.add_argument("--roboflow-model", default=None, help="Roboflow model id, for example project-id/version.")
+    parser.add_argument("--roboflow-model", default="tennis-vhrs9/9", help="Roboflow model id.")
     parser.add_argument("--roboflow-api-key", default=None, help="Roboflow API key. Prefer ROBOFLOW_API_KEY env var.")
     parser.add_argument("--roboflow-api-url", default="https://serverless.roboflow.com")
     parser.add_argument("--roboflow-client", choices=["sdk", "legacy"], default="sdk")
