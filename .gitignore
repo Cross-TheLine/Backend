@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+line_detection_output*/
+*.env
