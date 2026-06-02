@@ -8,8 +8,20 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from general import postprocess
-from infer_on_video import interpolation, read_video, remove_outliers, smooth_track, split_track
+from general import postprocess_candidates
+from infer_on_video import (
+    MIN_TRACK_CONFIDENCE,
+    bridge_short_gaps,
+    choose_temporal_candidate,
+    interpolation,
+    kalman_smooth_track,
+    offline_smooth_track,
+    read_video,
+    refine_visual_center,
+    remove_outliers,
+    smooth_track,
+    split_track,
+)
 from model import BallTrackerNet
 
 
@@ -37,6 +49,7 @@ def load_tracknet(model_path, device):
 def infer_ball_track(frames, model, device):
     train_track = [(None, None)] * 2
     dists = [-1] * 2
+    scores = [0.0] * 2
 
     for idx in tqdm(range(2, len(frames)), desc='TrackNet'):
         img = cv2.resize(frames[idx], (MODEL_WIDTH, MODEL_HEIGHT))
@@ -51,8 +64,19 @@ def infer_ball_track(frames, model, device):
         with torch.no_grad():
             out = model(torch.from_numpy(inp).float().to(device))
         output = out.argmax(dim=1).detach().cpu().numpy()
-        x_pred, y_pred = postprocess(output)
+        candidates = postprocess_candidates(
+            output,
+            peak_threshold=MIN_TRACK_CONFIDENCE,
+        )
+        x_pred, y_pred, score = choose_temporal_candidate(candidates, train_track)
+        x_pred, y_pred = refine_visual_center(
+            frames[idx],
+            x_pred,
+            y_pred,
+            prev_frame=frames[idx - 1] if idx > 0 else None,
+        )
         train_track.append((x_pred, y_pred))
+        scores.append(score)
 
         if train_track[-1][0] and train_track[-2][0]:
             dist = np.linalg.norm(np.array(train_track[-1]) - np.array(train_track[-2]))
@@ -64,6 +88,9 @@ def infer_ball_track(frames, model, device):
     subtracks = split_track(train_track)
     for start, end in subtracks:
         train_track[start:end] = interpolation(train_track[start:end])
+    train_track, statuses = kalman_smooth_track(train_track, scores, return_statuses=True)
+    train_track, _ = bridge_short_gaps(train_track, statuses)
+    train_track = offline_smooth_track(train_track)
     train_track = smooth_track(train_track)
     return train_track
 
