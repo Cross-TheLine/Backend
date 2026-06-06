@@ -29,6 +29,218 @@ def as_point(value):
     return float(value[0]), float(value[1])
 
 
+def frame_size_from_record(record):
+    if 'width' in record and 'height' in record:
+        return float(record['width']), float(record['height'])
+    if 'image_shape_hwc' in record:
+        height, width = record['image_shape_hwc'][:2]
+        return float(width), float(height)
+    raise KeyError('View2 line record must include width/height or image_shape_hwc')
+
+
+def video_size(path):
+    import cv2
+
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f'Could not open video for size detection: {path}')
+    width = float(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = float(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f'Could not read video size: {path}')
+    return width, height
+
+
+def closest_record_by_size(records, target_width, target_height):
+    def score(record):
+        width, height = frame_size_from_record(record)
+        aspect_error = abs((width / height) - (target_width / target_height)) * 1000.0
+        size_error = abs(width - target_width) + abs(height - target_height)
+        return aspect_error + size_error
+
+    return min(records, key=score)
+
+
+def select_view2_record(data, config_image=None, config_index=0,
+                        target_width=None, target_height=None):
+    records = data if isinstance(data, list) else [data]
+    if not records:
+        raise ValueError('Court config does not contain any records')
+
+    if config_image:
+        wanted = Path(config_image).name
+        matches = [
+            record for record in records
+            if Path(str(record.get('image', ''))).name == wanted
+        ]
+        if not matches:
+            raise ValueError(f'No view2 record found for image: {config_image}')
+        return matches[0]
+
+    if target_width is not None and target_height is not None:
+        return closest_record_by_size(records, target_width, target_height)
+
+    if len(records) == 1:
+        return records[0]
+
+    if config_index < 0 or config_index >= len(records):
+        raise IndexError(f'config_index out of range: {config_index}')
+    return records[config_index]
+
+
+def line_endpoints(line):
+    points = (
+        line.get('points') or
+        line.get('extended_endpoints') or
+        line.get('segment_endpoints')
+    )
+    if points is None or len(points) != 2:
+        raise ValueError(f'View2 line needs two endpoints: {line}')
+    return [as_point(point) for point in points]
+
+
+def distance_to_frame_border(point, width, height):
+    x, y = point
+    return min(x, y, width - 1.0 - x, height - 1.0 - y)
+
+
+def split_border_and_vertex(endpoint_a, endpoint_b, width, height):
+    if distance_to_frame_border(endpoint_a, width, height) <= distance_to_frame_border(endpoint_b, width, height):
+        return endpoint_a, endpoint_b
+    return endpoint_b, endpoint_a
+
+
+def perimeter_position(point, width, height):
+    x, y = point
+    right = width - 1.0
+    bottom = height - 1.0
+    distances = {
+        'top': abs(y),
+        'right': abs(right - x),
+        'bottom': abs(bottom - y),
+        'left': abs(x),
+    }
+    edge = min(distances, key=distances.get)
+    if edge == 'top':
+        return max(0.0, min(right, x))
+    if edge == 'right':
+        return right + max(0.0, min(bottom, y))
+    if edge == 'bottom':
+        return right + bottom + max(0.0, min(right, right - x))
+    return right + bottom + right + max(0.0, min(bottom, bottom - y))
+
+
+def clockwise_boundary_arc(start, end, width, height):
+    right = width - 1.0
+    bottom = height - 1.0
+    perimeter = 2.0 * (right + bottom)
+    corner_points = [
+        (0.0, 0.0),
+        (right, 0.0),
+        (right, bottom),
+        (0.0, bottom),
+    ]
+    corner_positions = [0.0, right, right + bottom, right + bottom + right]
+
+    start_pos = perimeter_position(start, width, height)
+    end_pos = perimeter_position(end, width, height)
+    if end_pos < start_pos:
+        end_pos += perimeter
+
+    arc = [start]
+    for corner, position in zip(corner_points, corner_positions):
+        for shifted in (position, position + perimeter):
+            if start_pos < shifted < end_pos:
+                arc.append(corner)
+    arc.append(end)
+    return arc
+
+
+def top_boundary_arc(start, end, width, height):
+    clockwise = clockwise_boundary_arc(start, end, width, height)
+    counter_clockwise = list(reversed(clockwise_boundary_arc(end, start, width, height)))
+
+    def average_y(points):
+        return sum(point[1] for point in points) / max(len(points), 1)
+
+    if average_y(clockwise) <= average_y(counter_clockwise):
+        return clockwise
+    return counter_clockwise
+
+
+def scale_point(point, scale_x, scale_y):
+    return float(point[0]) * scale_x, float(point[1]) * scale_y
+
+
+def view2_lines_to_polygon_config(record, target_width=None, target_height=None):
+    width, height = frame_size_from_record(record)
+    target_width = width if target_width is None else float(target_width)
+    target_height = height if target_height is None else float(target_height)
+    scale_x = target_width / width
+    scale_y = target_height / height
+
+    lines = record.get('lines', [])
+    named_lines = {line.get('name'): line for line in lines}
+    top_line = named_lines.get('top_to_vertex')
+    side_line = named_lines.get('side_to_vertex')
+    if top_line is None or side_line is None:
+        if len(lines) != 2:
+            raise ValueError('View2 config must contain top_to_vertex and side_to_vertex lines')
+        top_line, side_line = lines
+
+    top_border, top_vertex = split_border_and_vertex(
+        *line_endpoints(top_line),
+        width,
+        height,
+    )
+    side_border, side_vertex = split_border_and_vertex(
+        *line_endpoints(side_line),
+        width,
+        height,
+    )
+
+    top_border = scale_point(top_border, scale_x, scale_y)
+    top_vertex = scale_point(top_vertex, scale_x, scale_y)
+    side_border = scale_point(side_border, scale_x, scale_y)
+    side_vertex = scale_point(side_vertex, scale_x, scale_y)
+
+    polygon = top_boundary_arc(top_border, side_border, target_width, target_height)
+    polygon.extend([side_vertex, top_vertex])
+
+    return {
+        'mode': 'polygon',
+        'court_polygon': [[round(x, 3), round(y, 3)] for x, y in polygon],
+        'line_tolerance_px': 3.0,
+        'source_mode': 'view2_lines',
+        'source_image': record.get('image', ''),
+        'source_view_side': record.get('view_side') or record.get('layout', ''),
+        'source_size': [width, height],
+        'target_size': [target_width, target_height],
+    }
+
+
+def normalize_config(data, args):
+    if isinstance(data, dict) and data.get('mode') in {'polygon', 'line'}:
+        return data
+
+    target_width = args.target_width
+    target_height = args.target_height
+    if args.video_path:
+        target_width, target_height = video_size(args.video_path)
+
+    record = select_view2_record(
+        data,
+        config_image=args.config_image,
+        config_index=args.config_index,
+        target_width=target_width,
+        target_height=target_height,
+    )
+    if not (record.get('view') == 'view2' or record.get('mode') == 'view2'):
+        raise ValueError('Only polygon/line configs and view2 line records are supported')
+    return view2_lines_to_polygon_config(record, target_width, target_height)
+
+
 def signed_distance_to_line(point, line_start, line_end):
     px, py = point
     x1, y1 = line_start
@@ -185,9 +397,27 @@ def main():
     parser.add_argument('--output_root', type=Path, default=Path('output_inout'))
     parser.add_argument('--x_column', type=str, default='contact_x')
     parser.add_argument('--y_column', type=str, default='contact_y')
+    parser.add_argument('--config_image', type=str,
+                        help='image name to select when court_config contains multiple view2 records')
+    parser.add_argument('--config_index', type=int, default=0,
+                        help='record index to select when court_config contains multiple view2 records')
+    parser.add_argument('--target_width', type=float,
+                        help='scale view2 line coordinates to this frame width')
+    parser.add_argument('--target_height', type=float,
+                        help='scale view2 line coordinates to this frame height')
+    parser.add_argument('--video_path', type=Path,
+                        help='video used to infer target width/height for view2 line configs')
     args = parser.parse_args()
 
-    config = load_json(args.court_config)
+    config = normalize_config(load_json(args.court_config), args)
+    if config.get('source_mode') == 'view2_lines':
+        print(
+            'court_config=view2_lines image={} source_size={} target_size={}'.format(
+                config.get('source_image', ''),
+                config.get('source_size', ''),
+                config.get('target_size', ''),
+            )
+        )
     csv_paths = iter_bounce_csvs(args.input)
     args.output_root.mkdir(parents=True, exist_ok=True)
 
