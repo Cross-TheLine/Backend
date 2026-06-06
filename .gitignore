@@ -1,13 +1,14 @@
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 .DS_Store
+*.env
 
 datasets/
 downloads/
 weights/
 output/
 output_*/
+line_detection_output*/
 
 *.mp4
 *.avi

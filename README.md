@@ -1,58 +1,65 @@
-# TrackNet
-<i> It's not an official implementation </i> <br>
-**Tracknet** is a deep learning network for tracking the tennis ball from broadcast videos in which the ball images are small, blurry, and sometimes even invisible. TrackNet takes multiple consecutive frames as input, model will learn not only object tracking but also trajectory to enhance its capability of positioning and recognition.TrackNet generates gaussian heat map centered on ball to indicate position of the ball.
+# Cross The Line Backend
 
-## Architecture
-![](pics/tracknet_arch.jpg)
+Tennis ball tracking, bounce detection, line detection, and in/out judgment for segmented tennis videos.
 
-## Dataset
-Dataset consists of video clips of 10 broadcast video. Each video contains several clips from ball serving to score. There are 19.835 labeled frames in the dataset. The resolution, frame rate are 1280×720, 30 fps respectively. In the label file, each frame may have the following attributes: "Frame Name", "Visibility Class", "X", "Y", and "Trajectory Pattern". Click the link https://drive.google.com/drive/folders/11r0RUaQHX7I3ANkaYG4jOxXK1OYo01Ut to download the dataset.
+## Environment
 
-## Getting started
-1. Clone the repository `https://github.com/yastrebksv/TrackNet.git`
-2. Run `pip3 install -r requirements.txt` to install packages required. 
-3. Run `python gt_gen.py <args>` to create ground truth images and train/test labels.
-4. Prepare dataset to the following format:
+- Python 3.11+
+- Install packages:
+
+```powershell
+pip install -r requirements.txt
 ```
-datasets/trackNet
-    /images
-        /game1
-            /Clip1
-                /0000.jpg
-                ...
-                /0206.jpg
-            ...
-            /Clip13
-                /0000.jpg
-                ...
-                /0252.jpg
-        ...
-        /game10
-    /gts
-        /game1
-            /Clip1
-                /0000.jpg
-                ...
-                /0206.jpg
-            ...
-            /Clip13
-                /0000.jpg
-                ...
-                /0252.jpg
-        ...
-        /game10
-    /labels_train.csv
-    /labels_val.csv
+
+For NVIDIA GPU inference, install the CUDA PyTorch wheel:
+
+```powershell
+pip install --upgrade --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
-5. Run `python main.py` to start training
-## Pretrained model
-You can check these weights
-https://drive.google.com/file/d/1XEYZ4myUN7QT-NeBYJI0xteLsvs-ZAOl/view?usp=sharing to try the model
 
-## Inference on video
-![](pics/video_infer.gif)
-Run `python infer_on_video.py <args>` to launch inference on the video. 
+## Required Weights
 
-## Reference
-[https://arxiv.org/abs/1907.03698](https://arxiv.org/abs/1907.03698) <br>
-TrackNet: A Deep Learning Network for Tracking High-speed and Tiny Objects in Sports Applications
+```text
+weights/tracknet_pretrained.pt
+```
+
+## Folders
+
+- `input/slow_inputs_seg/`: segmented input videos.
+- `input/slow_inputs_unity/`: Unity input videos.
+- `output/`: generated result folders and archives.
+- `src/ball_tracking/`: TrackNet model, heatmap post-processing, ball trajectory tracking.
+- `src/bounce_detection/`: bounce detection from tracked coordinates.
+- `src/inout_judgement/`: in/out judgment from bounce coordinates.
+- `src/line_detection/`: AprilTag and court-line detection helpers.
+
+## Core Files
+
+- `src/ball_tracking/infer_on_video.py`: TrackNet ball tracking and trajectory post-processing.
+- `src/ball_tracking/model.py`: TrackNet model definition.
+- `src/ball_tracking/general.py`: TrackNet heatmap post-processing helpers.
+- `src/bounce_detection/detect_bounces.py`: Existing y-velocity reversal bounce detector.
+- `src/bounce_detection/detect_bounces_from_track_csv.py`: Saves TrackNet coordinates to CSV, then detects bounces from y-value reversal.
+- `src/inout_judgement/judge_in_out.py`: Optional in/out judgment from bounce CSVs.
+- `src/line_detection/*.py`: AprilTag and court-line detection utilities.
+
+## Run Ball Tracking
+
+```powershell
+python -m src.ball_tracking.infer_on_video --model_path .\weights\tracknet_pretrained.pt --video_path .\input\slow_inputs_seg\video.avi --video_out_path .\output\video_track.avi --device cuda
+```
+
+## Run Y-Reversal Bounce Detection
+
+This uses TrackNet coordinates and detects the point where the ball falls downward
+then rebounds upward:
+
+```powershell
+python -m src.bounce_detection.detect_bounces_from_track_csv --video_path ".\input\slow_inputs_seg\3대 작은마커\try5\try5_seg08_slow_0_5x.avi" --output_root .\output\output_y_reversal_bounces --device cuda
+```
+
+Outputs:
+
+- `<video>_track.csv`
+- `<video>_y_bounces.csv`
+- `<video>_y_bounces.avi`
