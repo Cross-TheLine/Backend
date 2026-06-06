@@ -8,22 +8,12 @@ import cv2
 import numpy as np
 
 
-APRILTAG_FAMILIES = {
-    "tag16h5": cv2.aruco.DICT_APRILTAG_16H5,
-    "tag25h9": cv2.aruco.DICT_APRILTAG_25H9,
-    "tag36h10": cv2.aruco.DICT_APRILTAG_36H10,
-    "tag36h11": cv2.aruco.DICT_APRILTAG_36H11,
-}
-
+APRILTAG_DICTIONARY = cv2.aruco.DICT_APRILTAG_36H11
 MARKER_EDGES = ((0, 1), (1, 2), (2, 3), (3, 0))
 
 
-def family_dictionary(family: str) -> int:
-    key = family.lower()
-    if key not in APRILTAG_FAMILIES:
-        known = ", ".join(sorted(APRILTAG_FAMILIES))
-        raise ValueError(f"Unknown AprilTag family {family!r}. Known: {known}")
-    return APRILTAG_FAMILIES[key]
+def tag_dictionary() -> cv2.aruco.Dictionary:
+    return cv2.aruco.getPredefinedDictionary(APRILTAG_DICTIONARY)
 
 
 def read_image_exif(path: Path) -> np.ndarray:
@@ -43,17 +33,13 @@ def rounded_point(point: list[float] | np.ndarray) -> list[float]:
     return [round(float(point[0]), 2), round(float(point[1]), 2)]
 
 
-def detect_apriltags(image: np.ndarray, family: str, min_side_px: float) -> tuple[list[dict], dict]:
+def detect_apriltags(image: np.ndarray, min_side_px: float) -> list[dict]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    dictionary = cv2.aruco.getPredefinedDictionary(family_dictionary(family))
     params = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(dictionary, params)
-    corners, ids, rejected = detector.detectMarkers(gray)
+    detector = cv2.aruco.ArucoDetector(tag_dictionary(), params)
+    corners, ids, _ = detector.detectMarkers(gray)
     if ids is None:
-        return [], {
-            "raw_marker_count": 0,
-            "rejected_count": 0 if rejected is None else len(rejected),
-        }
+        return []
 
     markers: list[dict] = []
     for marker_corners, marker_id in zip(corners, ids.flatten()):
@@ -80,10 +66,7 @@ def detect_apriltags(image: np.ndarray, family: str, min_side_px: float) -> tupl
     markers.sort(key=lambda marker: (marker["id"], marker["center"][1], marker["center"][0]))
     for marker_index, marker in enumerate(markers, start=1):
         marker["marker_index"] = marker_index
-    return markers, {
-        "raw_marker_count": len(ids),
-        "rejected_count": 0 if rejected is None else len(rejected),
-    }
+    return markers
 
 
 def marker_edges(marker: dict) -> list[tuple[tuple[int, int], np.ndarray]]:
@@ -168,15 +151,6 @@ def ray_endpoints(
     return [rounded_point(border), rounded_point(anchor_point)]
 
 
-def marker_summary(marker: dict) -> dict:
-    return {
-        "marker_index": marker["marker_index"],
-        "id": marker["id"],
-        "center": rounded_point(marker["center"]),
-        "side_px_mean": round(float(marker["side_px_mean"]), 2),
-    }
-
-
 def assign_view2_roles(markers: list[dict]) -> tuple[dict[str, dict], str]:
     if len(markers) < 3:
         raise RuntimeError(f"Need at least 3 AprilTags for view2, found {len(markers)}")
@@ -186,12 +160,12 @@ def assign_view2_roles(markers: list[dict]) -> tuple[dict[str, dict], str]:
     remaining = [marker for marker in picked if marker is not vertex]
     top_marker = min(remaining, key=lambda marker: marker["center"][1])
     side_marker = max(remaining, key=lambda marker: marker["center"][1])
-    layout = "left" if top_marker["center"][0] < side_marker["center"][0] else "right"
+    view_side = "left" if top_marker["center"][0] < side_marker["center"][0] else "right"
     return {
         "top_marker": top_marker,
         "side_marker": side_marker,
         "vertex": vertex,
-    }, layout
+    }, view_side
 
 
 def select_outer_edge_pair(
@@ -239,7 +213,7 @@ def select_outer_edge_pair(
     return max(viable, key=lambda candidate: candidate["inside_distance"])
 
 
-def build_view2_lines(image_shape: tuple[int, int, int], roles: dict[str, dict], layout: str) -> list[dict]:
+def build_view2_lines(image_shape: tuple[int, int, int], roles: dict[str, dict]) -> list[dict]:
     height, width = image_shape[:2]
     specs = [
         ("top_to_vertex", "top_marker", "side_marker"),
@@ -260,60 +234,24 @@ def build_view2_lines(image_shape: tuple[int, int, int], roles: dict[str, dict],
         lines.append(
             {
                 "name": name,
-                "method": "view2_edge_fit",
-                "layout": layout,
-                "marker_roles": [line_role, "vertex"],
-                "marker_indices": [line_marker["marker_index"], vertex_marker["marker_index"]],
-                "marker_ids": [line_marker["id"], vertex_marker["id"]],
-                "inside_marker_role": inside_role,
-                "inside_marker_index": inside_marker["marker_index"],
-                "inside_marker_id": inside_marker["id"],
-                "edges": [
-                    {
-                        "marker_role": line_role,
-                        "marker_index": line_marker["marker_index"],
-                        "marker_id": line_marker["id"],
-                        "edge": [int(selected["line_edge"][0]), int(selected["line_edge"][1])],
-                    },
-                    {
-                        "marker_role": "vertex",
-                        "marker_index": vertex_marker["marker_index"],
-                        "marker_id": vertex_marker["id"],
-                        "edge": [int(selected["vertex_edge"][0]), int(selected["vertex_edge"][1])],
-                    },
-                ],
-                "fit_points": [rounded_point(point) for point in selected["fit_points"]],
-                "segment_endpoints": [rounded_point(line_endpoint), rounded_point(vertex_endpoint)],
-                "vertex_endpoint": rounded_point(vertex_endpoint),
-                "extended_endpoints": extended,
-                "fit_error_px": round(float(selected["fit_error"]), 3),
-                "parallel_error": round(float(selected["parallel_error"]), 5),
-                "inside_distance_px": round(float(selected["inside_distance"]), 3),
+                "points": extended or [rounded_point(line_endpoint), rounded_point(vertex_endpoint)],
             }
         )
     return lines
 
 
-def process_image(path: Path, family: str, min_side_px: float) -> dict:
+def process_image(path: Path, min_side_px: float) -> dict:
     image = read_image_exif(path)
-    markers, detection = detect_apriltags(image, family, min_side_px)
-    roles, layout = assign_view2_roles(markers)
-    lines = build_view2_lines(image.shape, roles, layout)
+    height, width = image.shape[:2]
+    markers = detect_apriltags(image, min_side_px)
+    roles, view_side = assign_view2_roles(markers)
+    lines = build_view2_lines(image.shape, roles)
     return {
-        "schema": "apriltag_view2_lines.v1",
         "image": str(path),
-        "image_shape_hwc": list(image.shape),
-        "family": family,
-        "mode": "view2",
-        "method": "view2_edge_fit",
-        "marker_count": len(markers),
-        "raw_marker_count": detection["raw_marker_count"],
-        "rejected_count": detection["rejected_count"],
-        "min_side_px": min_side_px,
-        "layout": layout,
-        "role_rule": "Use the largest three detected tags. The marker with the largest image y center is the vertex; the two remaining markers decide left/right layout.",
-        "markers": markers,
-        "roles": {role_name: marker_summary(marker) for role_name, marker in roles.items()},
+        "width": width,
+        "height": height,
+        "view": "view2",
+        "view_side": view_side,
         "lines": lines,
     }
 
@@ -322,12 +260,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Detect AprilTag-guided view2 court-corner lines and export JSON.")
     parser.add_argument("--inputs", nargs="+", required=True)
     parser.add_argument("--out-json", required=True)
-    parser.add_argument("--family", default="tag36h11", choices=sorted(APRILTAG_FAMILIES))
     parser.add_argument("--min-side-px", type=float, default=0.0)
     args = parser.parse_args()
 
     records = [
-        process_image(Path(input_path), args.family, args.min_side_px)
+        process_image(Path(input_path), args.min_side_px)
         for input_path in args.inputs
     ]
     out_json = Path(args.out_json)
