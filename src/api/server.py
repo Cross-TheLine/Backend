@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import shutil
 import uuid
@@ -10,25 +11,17 @@ from types import SimpleNamespace
 from typing import Any
 
 import cv2
-import torch
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from src.bounce_detection.detect_bounces import (
-    load_model,
-    scale_track_to_frame,
-    select_device,
-    track_ball,
+from src.inout_judgement.judge_in_out import judge_csv, load_json, normalize_config
+from src.inout_judgement.overlay_in_out import write_overlay_video
+from src.line_detection.detect_view2_apriltag_lines import (
+    APRILTAG_FAMILIES,
+    family_dictionary,
+    process_image as detect_view2_court_config,
 )
-from src.bounce_detection.detect_bounces_from_track_csv import (
-    detect_y_reversal_bounces,
-    write_bounce_csv,
-    write_track_csv,
-    write_video as write_bounce_video,
-)
-from src.ball_tracking.infer_on_video import read_video
-from src.line_detection.detect_view2_apriltag_lines import APRILTAG_FAMILIES, family_dictionary
 
 
 OUTPUT_ROOT = Path("output") / "api_sessions"
@@ -59,23 +52,90 @@ class RecordPathRequest(BaseModel):
     path: str
 
 
+class CourtConfigPathRequest(BaseModel):
+    path: str
+    config_image: str | None = None
+    config_index: int = 0
+
+
 class JudgeRequest(BaseModel):
-    pressed_at_sec: float = Field(ge=0)
+    pressed_at_sec: float | None = Field(default=None, ge=0)
+    use_video_end: bool = False
+    end_offset_sec: float = Field(default=0.0, ge=0)
     lookback_sec: float = Field(default=DEFAULT_LOOKBACK_SEC, gt=0)
     render_video: bool = True
+    court_config_path: str | None = None
+    config_image: str | None = None
+    config_index: int | None = None
+    render_inout_video: bool = True
 
 
 class JudgePreprocessRequest(BaseModel):
     recording_path: str
-    pressed_at_sec: float = Field(ge=0)
+    pressed_at_sec: float | None = Field(default=None, ge=0)
+    use_video_end: bool = False
+    end_offset_sec: float = Field(default=0.0, ge=0)
     lookback_sec: float = Field(default=DEFAULT_LOOKBACK_SEC, gt=0)
     render_video: bool = True
     session_id: str | None = None
+    court_config_path: str | None = None
+    config_image: str | None = None
+    config_index: int = 0
+    render_inout_video: bool = True
 
 
 class JudgeQueuedResponse(BaseModel):
     job_id: str
     status: str
+
+
+class ArtifactUrls(BaseModel):
+    clip: str | None = None
+    track_csv: str | None = None
+    bounces_csv: str | None = None
+    result_video: str | None = None
+    inout_csv: str | None = None
+    inout_overlay_video: str | None = None
+
+
+class BounceResult(BaseModel):
+    frame_index: int
+    clip_time_sec: float
+    recording_time_sec: float
+    x: float
+    y: float
+    score: float | None = None
+    vy_before: float | None = None
+    vy_after: float | None = None
+    prominence: float | None = None
+    x_velocity_change: float | None = None
+
+
+class InoutDecision(BaseModel):
+    frame_index: int
+    clip_time_sec: float
+    recording_time_sec: float
+    x: float
+    y: float
+    decision: str
+    decision_reason: str
+    boundary_distance_px: float | None = None
+    signed_distance_px: float | None = None
+
+
+class FrontendJobResult(BaseModel):
+    job_id: str
+    session_id: str | None = None
+    status: str
+    result: str | None = None
+    confidence: float | None = None
+    timing: dict[str, Any] | None = None
+    primary_bounce: BounceResult | None = None
+    primary_decision: InoutDecision | None = None
+    bounces: list[BounceResult] = Field(default_factory=list)
+    decisions: list[InoutDecision] = Field(default_factory=list)
+    artifacts: ArtifactUrls = Field(default_factory=ArtifactUrls)
+    error: str | None = None
 
 
 def session_dir(session_id: str) -> Path:
@@ -122,9 +182,34 @@ def relative_file_url(path: Path) -> str:
     return "/files/" + rel.as_posix()
 
 
+def torch_available() -> bool:
+    return importlib.util.find_spec("torch") is not None
+
+
+def runtime_health() -> dict[str, Any]:
+    weights_available = DEFAULT_MODEL_PATH.exists()
+    return {
+        "status": "ok" if torch_available() and weights_available else "degraded",
+        "torch_available": torch_available(),
+        "weights_available": weights_available,
+        "weights_path": str(DEFAULT_MODEL_PATH),
+        "weights_size_bytes": DEFAULT_MODEL_PATH.stat().st_size if weights_available else 0,
+        "judge_ready": torch_available() and weights_available,
+    }
+
+
 def get_model():
     global _model, _model_device
     if _model is None:
+        try:
+            from src.bounce_detection.detect_bounces import load_model, select_device
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                raise RuntimeError(
+                    "missing torch. Install PyTorch before running full judge jobs."
+                ) from exc
+            raise
+
         if not DEFAULT_MODEL_PATH.exists():
             raise RuntimeError(f"missing model weights: {DEFAULT_MODEL_PATH}")
         _model_device = select_device(DEFAULT_DEVICE)
@@ -136,11 +221,15 @@ def video_info(path: Path) -> dict[str, Any]:
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"could not open video: {path}")
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+    duration_sec = frame_count / fps if fps > 0 else 0.0
     info = {
-        "frame_count": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-        "fps": float(cap.get(cv2.CAP_PROP_FPS) or 0),
+        "frame_count": frame_count,
+        "fps": fps,
         "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
         "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        "duration_sec": duration_sec,
     }
     cap.release()
     return info
@@ -247,13 +336,157 @@ def bounce_payload(row: dict[str, Any], clip_start_sec: float) -> dict[str, Any]
     }
 
 
+def read_csv_rows(path: Path) -> list[dict[str, Any]]:
+    with path.open("r", newline="", encoding="utf-8-sig") as csv_file:
+        return list(csv.DictReader(csv_file))
+
+
+def inout_payload(row: dict[str, Any], clip_start_sec: float) -> dict[str, Any]:
+    return {
+        "frame_index": int(float(row["frame_index"])),
+        "clip_time_sec": float(row["time_sec"]),
+        "recording_time_sec": float(row["time_sec"]) + clip_start_sec,
+        "x": float(row.get("judge_x") or row.get("x")),
+        "y": float(row.get("judge_y") or row.get("y")),
+        "decision": row.get("decision", "UNKNOWN"),
+        "decision_reason": row.get("decision_reason", ""),
+        "boundary_distance_px": (
+            None if row.get("boundary_distance_px", "") == "" else float(row["boundary_distance_px"])
+        ),
+        "signed_distance_px": (
+            None if row.get("signed_distance_px", "") == "" else float(row["signed_distance_px"])
+        ),
+    }
+
+
+def resolve_court_config(job: dict[str, Any], session: dict[str, Any]) -> tuple[Path | None, str | None, int]:
+    path = job.get("court_config_path") or session.get("court_config_path")
+    if not path:
+        return None, None, 0
+    config_path = Path(path)
+    if not config_path.exists():
+        raise RuntimeError(f"court config not found: {config_path}")
+    config_image = job.get("config_image") or session.get("config_image")
+    config_index = int(job.get("config_index", session.get("config_index", 0)) or 0)
+    return config_path, config_image, config_index
+
+
+def resolve_pressed_at_sec(
+    source_path: Path,
+    pressed_at_sec: float | None,
+    use_video_end: bool,
+    end_offset_sec: float,
+) -> tuple[float, dict[str, Any]]:
+    info = video_info(source_path)
+    duration_sec = float(info.get("duration_sec") or 0.0)
+    if pressed_at_sec is None or use_video_end:
+        raw_pressed_at_sec = duration_sec - end_offset_sec
+        source = "video_end"
+    else:
+        raw_pressed_at_sec = float(pressed_at_sec)
+        source = "request"
+
+    resolved = max(0.0, raw_pressed_at_sec)
+    if duration_sec > 0:
+        resolved = min(resolved, duration_sec)
+
+    return resolved, {
+        "source": source,
+        "raw_pressed_at_sec": raw_pressed_at_sec,
+        "pressed_at_sec": resolved,
+        "video_duration_sec": duration_sec,
+        "end_offset_sec": end_offset_sec,
+        "clamped": resolved != raw_pressed_at_sec,
+    }
+
+
+def run_inout(
+    current_job_dir: Path,
+    clip_path: Path,
+    track_csv: Path,
+    bounce_csv: Path,
+    court_config_path: Path,
+    config_image: str | None,
+    config_index: int,
+    clip_start_sec: float,
+    render_video: bool,
+) -> dict[str, Any]:
+    judged_csv = current_job_dir / "inout_judged.csv"
+    combined_video = current_job_dir / "inout_overlay.avi"
+
+    info = video_info(clip_path)
+    config_args = SimpleNamespace(
+        config_image=config_image,
+        config_index=config_index,
+        target_width=float(info["width"]),
+        target_height=float(info["height"]),
+        video_path=None,
+    )
+    config = normalize_config(load_json(court_config_path), config_args)
+    judge_csv(
+        input_csv=bounce_csv,
+        output_csv=judged_csv,
+        config=config,
+        x_column="x",
+        y_column="y",
+    )
+    rows = read_csv_rows(judged_csv)
+    decisions = [inout_payload(row, clip_start_sec) for row in rows]
+
+    artifacts = {"inout_csv": relative_file_url(judged_csv)}
+    if render_video:
+        overlay_args = SimpleNamespace(
+            video_path=clip_path,
+            court_config=court_config_path,
+            judged_csv=judged_csv,
+            output_path=combined_video,
+            track_csv=track_csv,
+            config_image=config_image,
+            config_index=config_index,
+            line_thickness=6,
+            trace=8,
+            bounce_display_window=4,
+            hide_track=False,
+        )
+        write_overlay_video(overlay_args)
+        if combined_video.exists():
+            artifacts["inout_overlay_video"] = relative_file_url(combined_video)
+
+    return {
+        "status": "done" if decisions else "no_bounce",
+        "court_config": {
+            "path": str(court_config_path),
+            "config_image": config_image,
+            "config_index": config_index,
+            "mode": config.get("mode"),
+            "source_mode": config.get("source_mode"),
+        },
+        "decisions": decisions,
+        "primary_decision": decisions[0] if decisions else None,
+        "artifacts": artifacts,
+    }
+
+
 def run_preprocess(
     source_path: Path,
     current_job_dir: Path,
     pressed_at_sec: float,
     lookback_sec: float,
     render_video: bool,
+    court_config_path: Path | None = None,
+    config_image: str | None = None,
+    config_index: int = 0,
+    render_inout_video: bool = True,
 ) -> dict[str, Any]:
+    from src.ball_tracking.infer_on_video import read_video
+    from src.bounce_detection.detect_bounces import scale_track_to_frame, track_ball
+    from src.bounce_detection.detect_bounces_from_track_csv import (
+        detect_y_reversal_bounces,
+        write_bounce_csv,
+        write_track_csv,
+        write_video as write_bounce_video,
+    )
+
     start_sec = max(0.0, pressed_at_sec - lookback_sec)
     end_sec = pressed_at_sec
 
@@ -293,6 +526,21 @@ def run_preprocess(
     if result_video.exists():
         artifacts["result_video"] = relative_file_url(result_video)
 
+    inout = None
+    if court_config_path is not None:
+        inout = run_inout(
+            current_job_dir=current_job_dir,
+            clip_path=clip_path,
+            track_csv=track_csv,
+            bounce_csv=bounce_csv,
+            court_config_path=court_config_path,
+            config_image=config_image,
+            config_index=config_index,
+            clip_start_sec=start_sec,
+            render_video=render_inout_video,
+        )
+        artifacts.update(inout["artifacts"])
+
     return {
         "clip": {
             "start_sec": start_sec,
@@ -311,7 +559,9 @@ def run_preprocess(
             "bounces": bounces_payload,
             "track_csv": str(track_csv),
             "bounces_csv": str(bounce_csv),
+            "court_config": None if court_config_path is None else str(court_config_path),
         },
+        "inout": inout,
         "tracking": {
             "frames": len(frames),
             "raw_detected": raw_detected,
@@ -334,18 +584,55 @@ def run_judgement_job(session_id: str, job_id: str) -> None:
 
         session = read_session(session_id)
         source_path = Path(session["recording_path"])
+        pressed_at_sec, timing = resolve_pressed_at_sec(
+            source_path=source_path,
+            pressed_at_sec=job.get("pressed_at_sec"),
+            use_video_end=bool(job.get("use_video_end", False)),
+            end_offset_sec=float(job.get("end_offset_sec", 0.0)),
+        )
+        job["pressed_at_sec"] = pressed_at_sec
+        job["timing"] = timing
+        write_job(session_id, job)
+        court_config_path, config_image, config_index = resolve_court_config(job, session)
         result = run_preprocess(
             source_path=source_path,
             current_job_dir=job_dir(session_id, job_id),
-            pressed_at_sec=float(job["pressed_at_sec"]),
+            pressed_at_sec=pressed_at_sec,
             lookback_sec=float(job["lookback_sec"]),
             render_video=bool(job.get("render_video", True)),
+            court_config_path=court_config_path,
+            config_image=config_image,
+            config_index=config_index,
+            render_inout_video=bool(job.get("render_inout_video", True)),
         )
         job.update({"status": "done", **result})
     except Exception as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
     write_job(session_id, job)
+
+
+def build_frontend_job_result(job: dict[str, Any]) -> dict[str, Any]:
+    inout = job.get("inout") or {}
+    return {
+        "job_id": job.get("job_id"),
+        "session_id": job.get("session_id"),
+        "status": job.get("status"),
+        "result": job.get("result"),
+        "confidence": job.get("confidence"),
+        "timing": job.get("timing"),
+        "primary_bounce": job.get("primary_bounce"),
+        "primary_decision": inout.get("primary_decision"),
+        "bounces": job.get("bounces") or [],
+        "decisions": inout.get("decisions") or [],
+        "artifacts": job.get("artifacts") or {},
+        "error": job.get("error"),
+    }
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return runtime_health()
 
 
 @app.post("/sessions/start", response_model=SessionResponse)
@@ -400,6 +687,110 @@ def line_status(
     session["last_line_status"] = response
     write_session(session)
     return response
+
+
+@app.post("/sessions/{session_id}/court-config/detect")
+def detect_court_config(
+    session_id: str,
+    frame: UploadFile = File(...),
+    family: str = "tag36h11",
+    min_side_px: float = 0.0,
+) -> dict[str, Any]:
+    if family not in APRILTAG_FAMILIES:
+        raise HTTPException(status_code=400, detail=f"unknown family: {family}")
+    session = read_session(session_id)
+
+    suffix = Path(frame.filename or "court_frame.jpg").suffix or ".jpg"
+    frame_path = session_dir(session_id) / "court_config_frames" / f"{uuid.uuid4()}{suffix}"
+    save_upload(frame, frame_path)
+
+    try:
+        record = detect_view2_court_config(frame_path, family, min_side_px)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail="could not read uploaded frame") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"court line detection failed: {exc}") from exc
+
+    config_path = session_dir(session_id) / "court_config_detected.json"
+    court_config = [record]
+    write_json(config_path, court_config)
+
+    session["court_config_path"] = str(config_path)
+    session["config_image"] = None
+    session["config_index"] = 0
+    session["court_config_detection"] = {
+        "frame_path": str(frame_path),
+        "frame_url": relative_file_url(frame_path),
+        "court_config_path": str(config_path),
+        "court_config_url": relative_file_url(config_path),
+        "schema": record.get("schema"),
+        "mode": record.get("mode"),
+        "family": record.get("family"),
+        "marker_count": record.get("marker_count"),
+        "line_count": len(record.get("lines", [])),
+    }
+    write_session(session)
+
+    return {
+        "session_id": session_id,
+        "court_config_path": str(config_path),
+        "config_image": None,
+        "config_index": 0,
+        "url": relative_file_url(config_path),
+        "frame": relative_file_url(frame_path),
+        "court_config": court_config,
+        "summary": session["court_config_detection"],
+    }
+
+
+@app.post("/sessions/{session_id}/court-config/upload")
+def upload_court_config(
+    session_id: str,
+    config: UploadFile = File(...),
+    config_image: str | None = None,
+    config_index: int = 0,
+) -> dict[str, Any]:
+    session = read_session(session_id)
+    suffix = Path(config.filename or "court_config.json").suffix or ".json"
+    config_path = session_dir(session_id) / f"court_config{suffix}"
+    save_upload(config, config_path)
+    try:
+        load_json(config_path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid court config JSON: {exc}") from exc
+    session["court_config_path"] = str(config_path)
+    session["config_image"] = config_image
+    session["config_index"] = config_index
+    write_session(session)
+    return {
+        "session_id": session_id,
+        "court_config_path": str(config_path),
+        "config_image": config_image,
+        "config_index": config_index,
+        "url": relative_file_url(config_path),
+    }
+
+
+@app.post("/sessions/{session_id}/court-config/path")
+def set_court_config_path(session_id: str, request: CourtConfigPathRequest) -> dict[str, Any]:
+    session = read_session(session_id)
+    config_path = Path(request.path)
+    if not config_path.exists():
+        raise HTTPException(status_code=404, detail=f"court config not found: {config_path}")
+    try:
+        load_json(config_path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid court config JSON: {exc}") from exc
+    session["court_config_path"] = str(config_path)
+    session["config_image"] = request.config_image
+    session["config_index"] = request.config_index
+    write_session(session)
+    return {
+        "session_id": session_id,
+        "court_config_path": str(config_path),
+        "config_image": request.config_image,
+        "config_index": request.config_index,
+    }
 
 
 @app.post("/sessions/{session_id}/record/start")
@@ -459,8 +850,14 @@ def judge(session_id: str, request: JudgeRequest, background_tasks: BackgroundTa
         "session_id": session_id,
         "status": "pending",
         "pressed_at_sec": request.pressed_at_sec,
+        "use_video_end": request.use_video_end or request.pressed_at_sec is None,
+        "end_offset_sec": request.end_offset_sec,
         "lookback_sec": request.lookback_sec,
         "render_video": request.render_video,
+        "court_config_path": request.court_config_path,
+        "config_image": request.config_image,
+        "config_index": request.config_index,
+        "render_inout_video": request.render_inout_video,
     }
     write_job(session_id, job)
     background_tasks.add_task(run_judgement_job, session_id, job_id)
@@ -480,6 +877,9 @@ def judge_preprocess(request: JudgePreprocessRequest, background_tasks: Backgrou
         "camera_label": None,
         "recording_path": str(recording_path),
         "recording": video_info(recording_path),
+        "court_config_path": request.court_config_path,
+        "config_image": request.config_image,
+        "config_index": request.config_index,
     }
     write_session(session)
 
@@ -489,8 +889,14 @@ def judge_preprocess(request: JudgePreprocessRequest, background_tasks: Backgrou
         "session_id": session_id,
         "status": "pending",
         "pressed_at_sec": request.pressed_at_sec,
+        "use_video_end": request.use_video_end or request.pressed_at_sec is None,
+        "end_offset_sec": request.end_offset_sec,
         "lookback_sec": request.lookback_sec,
         "render_video": request.render_video,
+        "court_config_path": request.court_config_path,
+        "config_image": request.config_image,
+        "config_index": request.config_index,
+        "render_inout_video": request.render_inout_video,
     }
     write_job(session_id, job)
     background_tasks.add_task(run_judgement_job, session_id, job_id)
@@ -501,6 +907,13 @@ def judge_preprocess(request: JudgePreprocessRequest, background_tasks: Backgrou
 def get_job(job_id: str) -> dict[str, Any]:
     for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
         return read_json(path)
+    raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
+
+
+@app.get("/jobs/{job_id}/result", response_model=FrontendJobResult)
+def get_job_result(job_id: str) -> FrontendJobResult:
+    for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
+        return FrontendJobResult(**build_frontend_job_result(read_json(path)))
     raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
 
 

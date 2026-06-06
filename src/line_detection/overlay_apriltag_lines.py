@@ -105,7 +105,7 @@ def draw_debug_edges_and_points(image: np.ndarray, record: dict) -> None:
 
 def draw_lines(image: np.ndarray, record: dict, thickness: int) -> None:
     for line in record.get("lines", []):
-        endpoints = line.get("extended_endpoints") or line.get("segment_endpoints")
+        endpoints = line.get("points") or line.get("extended_endpoints") or line.get("segment_endpoints")
         if endpoints is None:
             continue
         cv2.line(image, rounded_int_point(endpoints[0]), rounded_int_point(endpoints[1]), (255, 0, 0), thickness, cv2.LINE_AA)
@@ -165,8 +165,9 @@ def process_record(
     return {
         "image": str(image_path),
         "schema": record.get("schema"),
-        "mode": record.get("mode"),
+        "mode": record.get("mode", record.get("view")),
         "method": record.get("method"),
+        "view_side": record.get("view_side"),
         "line_count": len(record.get("lines", [])),
         "line_json": str(line_json),
         "overlay": str(overlay_path),
