@@ -3,8 +3,12 @@ __pycache__/
 .DS_Store
 *.env
 
+.codex_deps/
 datasets/
 downloads/
+input/
+park_test/
+unityData/
 weights/
 output/
 output_*/
