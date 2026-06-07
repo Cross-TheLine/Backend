@@ -21,13 +21,14 @@ from src.line_detection.detect_view2_apriltag_lines import (
     APRILTAG_FAMILIES,
     family_dictionary,
     process_image as detect_view2_court_config,
+    read_image_exif,
 )
 
 
 OUTPUT_ROOT = Path("output") / "api_sessions"
 DEFAULT_MODEL_PATH = Path("weights") / "tracknet_pretrained.pt"
 DEFAULT_DEVICE = "auto"
-DEFAULT_LOOKBACK_SEC = 3.0
+DEFAULT_LOOKBACK_SEC = 2.0
 
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="Cross The Line Backend", version="0.1.0")
@@ -237,6 +238,7 @@ def video_info(path: Path) -> dict[str, Any]:
 
 def save_upload(upload: UploadFile, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    upload.file.seek(0)
     with path.open("wb") as out_file:
         shutil.copyfileobj(upload.file, out_file)
 
@@ -665,7 +667,10 @@ def line_status(
     frame_path = session_dir(session_id) / "line_checks" / f"{uuid.uuid4()}.jpg"
     save_upload(frame, frame_path)
 
-    image = cv2.imread(str(frame_path))
+    try:
+        image = read_image_exif(frame_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail="could not read uploaded frame")
     if image is None:
         raise HTTPException(status_code=400, detail="could not read uploaded frame")
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)

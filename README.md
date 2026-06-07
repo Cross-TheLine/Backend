@@ -81,7 +81,7 @@ Request:
 {
   "recording_path": "C:/path/to/full_recording.mp4",
   "use_video_end": true,
-  "lookback_sec": 4.0,
+  "lookback_sec": 2.0,
   "render_video": true,
   "court_config_path": "C:/path/to/view2_lines.json",
   "config_image": null,
@@ -96,8 +96,11 @@ from the uploaded video and judges the last `lookback_sec` seconds:
 
 ```text
 pressed_at_sec = video_duration_sec - end_offset_sec
-clip_start_sec = pressed_at_sec - lookback_sec
+clip_start_sec = max(0, pressed_at_sec - lookback_sec)
 ```
+
+With the default `lookback_sec=2.0`, videos shorter than 2 seconds are judged from
+the beginning of the uploaded video.
 
 Use `end_offset_sec` only if the app keeps recording briefly after the button press.
 For example, if recording stops 0.5 seconds after the press, send

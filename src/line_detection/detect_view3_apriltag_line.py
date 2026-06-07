@@ -45,7 +45,10 @@ def read_image_exif(path: Path) -> np.ndarray:
         pil = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
         return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
     except Exception:
-        image = cv2.imread(str(path))
+        data = np.fromfile(str(path), dtype=np.uint8)
+        if data.size == 0:
+            raise FileNotFoundError(path)
+        image = cv2.imdecode(data, cv2.IMREAD_COLOR)
         if image is None:
             raise FileNotFoundError(path)
         return image
