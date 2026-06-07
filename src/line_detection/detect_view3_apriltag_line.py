@@ -9,15 +9,7 @@ import cv2
 import numpy as np
 
 
-APRILTAG_FAMILIES = {
-    "4x4_1000": cv2.aruco.DICT_4X4_1000,
-    "aruco_mip_36h12": cv2.aruco.DICT_ARUCO_MIP_36H12,
-    "tag16h5": cv2.aruco.DICT_APRILTAG_16H5,
-    "tag25h9": cv2.aruco.DICT_APRILTAG_25H9,
-    "tag36h10": cv2.aruco.DICT_APRILTAG_36H10,
-    "tag36h11": cv2.aruco.DICT_APRILTAG_36H11,
-}
-
+APRILTAG_DICTIONARY = cv2.aruco.DICT_APRILTAG_36H11
 MARKER_EDGES = ((0, 1), (1, 2), (2, 3), (3, 0))
 
 
@@ -30,12 +22,8 @@ def parse_marker_ids(value: str | None) -> list[int] | None:
     return marker_ids
 
 
-def family_dictionary(family: str) -> int:
-    key = family.lower()
-    if key not in APRILTAG_FAMILIES:
-        known = ", ".join(sorted(APRILTAG_FAMILIES))
-        raise ValueError(f"Unknown AprilTag family {family!r}. Known: {known}")
-    return APRILTAG_FAMILIES[key]
+def tag_dictionary() -> cv2.aruco.Dictionary:
+    return cv2.aruco.getPredefinedDictionary(APRILTAG_DICTIONARY)
 
 
 def read_image_exif(path: Path) -> np.ndarray:
@@ -58,17 +46,19 @@ def rounded_point(point: list[float] | np.ndarray) -> list[float]:
     return [round(float(point[0]), 2), round(float(point[1]), 2)]
 
 
-def detect_apriltags(image: np.ndarray, family: str, min_side_px: float) -> tuple[list[dict], dict]:
+def signed_line_side(point: np.ndarray, line_start: np.ndarray, line_end: np.ndarray) -> float:
+    dx = float(line_end[0] - line_start[0])
+    dy = float(line_end[1] - line_start[1])
+    return float((point[0] - line_start[0]) * dy - (point[1] - line_start[1]) * dx)
+
+
+def detect_apriltags(image: np.ndarray, min_side_px: float) -> list[dict]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    dictionary = cv2.aruco.getPredefinedDictionary(family_dictionary(family))
     params = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(dictionary, params)
-    corners, ids, rejected = detector.detectMarkers(gray)
+    detector = cv2.aruco.ArucoDetector(tag_dictionary(), params)
+    corners, ids, _ = detector.detectMarkers(gray)
     if ids is None:
-        return [], {
-            "raw_marker_count": 0,
-            "rejected_count": 0 if rejected is None else len(rejected),
-        }
+        return []
 
     markers: list[dict] = []
     for marker_corners, marker_id in zip(corners, ids.flatten()):
@@ -95,10 +85,7 @@ def detect_apriltags(image: np.ndarray, family: str, min_side_px: float) -> tupl
     markers.sort(key=lambda marker: (marker["id"], marker["center"][1], marker["center"][0]))
     for marker_index, marker in enumerate(markers, start=1):
         marker["marker_index"] = marker_index
-    return markers, {
-        "raw_marker_count": len(ids),
-        "rejected_count": 0 if rejected is None else len(rejected),
-    }
+    return markers
 
 
 def marker_edges(marker: dict) -> list[tuple[tuple[int, int], np.ndarray]]:
@@ -181,15 +168,6 @@ def ray_endpoints(
         key=lambda point: float(np.dot(np.array(point, dtype=np.float32) - anchor_point, direction)),
     )
     return [rounded_point(border), rounded_point(anchor_point)]
-
-
-def marker_summary(marker: dict) -> dict:
-    return {
-        "marker_index": marker["marker_index"],
-        "id": marker["id"],
-        "center": rounded_point(marker["center"]),
-        "side_px_mean": round(float(marker["side_px_mean"]), 2),
-    }
 
 
 def select_view3_roles(
@@ -279,7 +257,7 @@ def build_view3_line(
     image_shape: tuple[int, int, int],
     roles: dict[str, dict],
     vertical_weight: float,
-) -> dict:
+) -> tuple[dict, str]:
     height, width = image_shape[:2]
     line_top = roles["line_marker_top"]
     line_bottom = roles["line_marker_bottom"]
@@ -289,70 +267,41 @@ def build_view3_line(
     top_endpoint = selected["top_points"].mean(axis=0)
     bottom_endpoint = selected["bottom_points"].mean(axis=0)
     border = line_border_intersections(selected["point_on_line"], selected["direction"], width, height)
-    extended = ray_endpoints(border, bottom_endpoint, top_endpoint)
+    if border is None:
+        endpoints = [rounded_point(top_endpoint), rounded_point(bottom_endpoint)]
+    else:
+        endpoints = sorted(border, key=lambda point: (point[1], point[0]))
+
+    line_start = np.array(endpoints[0], dtype=np.float32)
+    line_end = np.array(endpoints[1], dtype=np.float32)
+    inside_center = np.array(inside_marker["center"], dtype=np.float32)
+    inside_side = signed_line_side(inside_center, line_start, line_end)
+    view_side = "left" if inside_side > 0 else "right"
 
     return {
         "name": "view3_vertical_outer_line",
-        "method": "view3_vertical_edge_fit",
-        "marker_roles": ["line_marker_top", "line_marker_bottom"],
-        "marker_indices": [line_top["marker_index"], line_bottom["marker_index"]],
-        "marker_ids": [line_top["id"], line_bottom["id"]],
-        "inside_marker_role": "inside_marker",
-        "inside_marker_index": inside_marker["marker_index"],
-        "inside_marker_id": inside_marker["id"],
-        "endpoint_marker_role": "line_marker_bottom",
-        "endpoint_marker_index": line_bottom["marker_index"],
-        "endpoint_marker_id": line_bottom["id"],
-        "edges": [
-            {
-                "marker_role": "line_marker_top",
-                "marker_index": line_top["marker_index"],
-                "marker_id": line_top["id"],
-                "edge": [int(selected["top_edge"][0]), int(selected["top_edge"][1])],
-            },
-            {
-                "marker_role": "line_marker_bottom",
-                "marker_index": line_bottom["marker_index"],
-                "marker_id": line_bottom["id"],
-                "edge": [int(selected["bottom_edge"][0]), int(selected["bottom_edge"][1])],
-            },
-        ],
-        "fit_points": [rounded_point(point) for point in selected["fit_points"]],
-        "segment_endpoints": [rounded_point(top_endpoint), rounded_point(bottom_endpoint)],
-        "endpoint": rounded_point(bottom_endpoint),
-        "extended_endpoints": extended,
-        "fit_error_px": round(float(selected["fit_error"]), 3),
-        "vertical_error": round(float(selected["vertical_error"]), 5),
-        "inside_distance_px": round(float(selected["inside_distance"]), 3),
-    }
+        "points": [rounded_point(point) for point in endpoints],
+    }, view_side
 
 
 def process_image(
     path: Path,
-    family: str,
     min_side_px: float,
     line_marker_ids: list[int] | None,
     vertical_weight: float,
 ) -> dict:
     image = read_image_exif(path)
-    markers, detection = detect_apriltags(image, family, min_side_px)
-    roles, pair_vertical_score = select_view3_roles(markers, line_marker_ids)
-    line = build_view3_line(image.shape, roles, vertical_weight)
+    height, width = image.shape[:2]
+    markers = detect_apriltags(image, min_side_px)
+    roles, _ = select_view3_roles(markers, line_marker_ids)
+    line, view_side = build_view3_line(image.shape, roles, vertical_weight)
     return {
-        "schema": "apriltag_view3_line.v1",
         "image": str(path),
-        "image_shape_hwc": list(image.shape),
-        "family": family,
-        "mode": "view3",
-        "method": "view3_vertical_edge_fit",
-        "marker_count": len(markers),
-        "raw_marker_count": detection["raw_marker_count"],
-        "rejected_count": detection["rejected_count"],
-        "min_side_px": min_side_px,
-        "pair_vertical_score": round(float(pair_vertical_score), 5),
-        "role_rule": "Use the largest three detected tags. The two markers whose centers are closest to screen-vertical define the target line; the third marker chooses the outside edge. The lower line marker is the endpoint.",
-        "markers": markers,
-        "roles": {role_name: marker_summary(marker) for role_name, marker in roles.items()},
+        "width": width,
+        "height": height,
+        "view": "view3",
+        "view_side": view_side,
+        "inside_point": rounded_point(roles["inside_marker"]["center"]),
         "lines": [line],
     }
 
@@ -361,7 +310,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Detect one screen-vertical AprilTag-guided view3 line and export JSON.")
     parser.add_argument("--inputs", nargs="+", required=True)
     parser.add_argument("--out-json", required=True)
-    parser.add_argument("--family", default="tag36h11", choices=sorted(APRILTAG_FAMILIES))
     parser.add_argument("--min-side-px", type=float, default=0.0)
     parser.add_argument(
         "--line-marker-ids",
@@ -378,7 +326,7 @@ def main() -> None:
 
     line_marker_ids = parse_marker_ids(args.line_marker_ids)
     records = [
-        process_image(Path(input_path), args.family, args.min_side_px, line_marker_ids, args.vertical_weight)
+        process_image(Path(input_path), args.min_side_px, line_marker_ids, args.vertical_weight)
         for input_path in args.inputs
     ]
     out_json = Path(args.out_json)

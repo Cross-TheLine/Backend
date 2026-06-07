@@ -170,6 +170,7 @@ def process_record(
         "schema": record.get("schema"),
         "mode": record.get("mode", record.get("view")),
         "method": record.get("method"),
+        "view": record.get("view", record.get("mode")),
         "view_side": record.get("view_side"),
         "line_count": len(record.get("lines", [])),
         "line_json": str(line_json),

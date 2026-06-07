@@ -1,1 +1,1 @@
-"""Line detection package."""
+"""Project source packages."""
