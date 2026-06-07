@@ -88,7 +88,7 @@ Request:
 {
   "recording_path": "C:/path/to/full_recording.mp4",
   "use_video_end": true,
-  "lookback_sec": 2.0,
+  "lookback_sec": 5.0,
   "render_video": true,
   "court_config_path": "C:/path/to/view2_lines.json",
   "config_image": null,
@@ -106,7 +106,7 @@ pressed_at_sec = video_duration_sec - end_offset_sec
 clip_start_sec = max(0, pressed_at_sec - lookback_sec)
 ```
 
-With the default `lookback_sec=2.0`, videos shorter than 2 seconds are judged from
+With the default `lookback_sec=5.0`, videos shorter than 5 seconds are judged from
 the beginning of the uploaded video.
 
 Use `end_offset_sec` only if the app keeps recording briefly after the button press.
@@ -135,6 +135,8 @@ Frontend result response:
   "session_id": "uuid",
   "status": "done",
   "result": "bounce_detected",
+  "decision": "IN",
+  "is_in": true,
   "confidence": 0.8,
   "primary_bounce": {
     "frame_index": 38,
@@ -187,6 +189,9 @@ POST /sessions/{session_id}/record/path
 POST /sessions/{session_id}/judge
 GET  /jobs/{job_id}
 GET  /jobs/{job_id}/result
+POST /jobs/{job_id}/save
+GET  /judgements
+GET  /judgements/{id}
 POST /sessions/{session_id}/save
 POST /sessions/{session_id}/finish
 ```
@@ -224,6 +229,56 @@ The backend saves the uploaded frame, detects AprilTag-guided view2 court lines,
 `court_config_detected.json`, and stores that path on the session. Later
 `POST /sessions/{session_id}/judge` automatically uses that detected config unless the
 judge request overrides `court_config_path`.
+
+### Save judgment records
+
+Use this after a job reaches `status=done` and the app needs to save the judged result
+in history.
+
+```text
+POST /jobs/{job_id}/save
+```
+
+Request:
+
+```json
+{
+  "match_type": "singles",
+  "recorded_at": "2026-06-07T12:30:00+09:00",
+  "recorded_date": "2026-06-07"
+}
+```
+
+`match_type` must be `singles` or `doubles`. If `recorded_at` is omitted, the backend
+uses the session `recorded_at` first and falls back to the save time.
+
+The saved SQLite record includes:
+
+- original uploaded video path and `/files` URL
+- judgment clip and overlay URLs
+- match type: singles or doubles
+- primary IN/OUT decision and reason
+- primary bounce and full job result JSON
+
+Query saved records:
+
+```text
+GET /judgements
+GET /judgements?match_type=singles
+GET /judgements?decision=OUT
+GET /judgements?recorded_date=2026-06-07
+GET /judgements?date_from=2026-06-01&date_to=2026-06-07
+GET /judgements/{id}
+```
+
+For compatibility, `POST /sessions/{session_id}/save` also saves the latest completed
+job in that session when given the same request body plus optional `job_id`.
+
+Records are stored in:
+
+```text
+output/judgements.sqlite3
+```
 
 ## CLI Pipeline
 

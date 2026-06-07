@@ -6,15 +6,23 @@ import json
 import shutil
 import uuid
 from collections import Counter
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import cv2
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from src.api.database import (
+    encode_json,
+    get_judgement_record,
+    init_db,
+    insert_judgement_record,
+    list_judgement_records,
+)
 from src.inout_judgement.judge_in_out import judge_csv, load_json, normalize_config
 from src.inout_judgement.overlay_in_out import write_overlay_video
 from src.line_detection.detect_view2_apriltag_lines import (
@@ -28,10 +36,24 @@ from src.line_detection.detect_view2_apriltag_lines import (
 OUTPUT_ROOT = Path("output") / "api_sessions"
 DEFAULT_MODEL_PATH = Path("weights") / "tracknet_pretrained.pt"
 DEFAULT_DEVICE = "auto"
-DEFAULT_LOOKBACK_SEC = 2.0
+DEFAULT_LOOKBACK_SEC = 5.0
+OPENAPI_TAGS = [
+    {"name": "상태", "description": "서버와 모델 준비 상태 확인 API"},
+    {"name": "세션", "description": "앱의 한 판정 흐름을 session_id로 묶는 API"},
+    {"name": "라인 인식", "description": "마커 안정화 체크와 코트 라인 JSON 생성 API"},
+    {"name": "녹화", "description": "녹화 상태와 판정용 영상 등록 API"},
+    {"name": "판정", "description": "공 추적, 바운스 검출, IN/OUT 판정 job 생성 API"},
+    {"name": "작업 결과", "description": "비동기 job 상태와 프론트용 결과 조회 API"},
+    {"name": "저장", "description": "판정 세션 저장과 종료 API"},
+]
 
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-app = FastAPI(title="Cross The Line Backend", version="0.1.0")
+init_db()
+app = FastAPI(
+    title="Cross The Line Backend",
+    version="0.1.0",
+    openapi_tags=OPENAPI_TAGS,
+)
 app.mount("/files", StaticFiles(directory=str(OUTPUT_ROOT), html=False), name="files")
 
 _model = None
@@ -57,6 +79,16 @@ class CourtConfigPathRequest(BaseModel):
     path: str
     config_image: str | None = None
     config_index: int = 0
+
+
+class SaveJudgementRequest(BaseModel):
+    match_type: Literal["singles", "doubles"]
+    recorded_at: datetime | None = None
+    recorded_date: date | None = None
+
+
+class SaveSessionJudgementRequest(SaveJudgementRequest):
+    job_id: str | None = None
 
 
 class JudgeRequest(BaseModel):
@@ -129,6 +161,8 @@ class FrontendJobResult(BaseModel):
     session_id: str | None = None
     status: str
     result: str | None = None
+    decision: str | None = None
+    is_in: bool | None = None
     confidence: float | None = None
     timing: dict[str, Any] | None = None
     primary_bounce: BounceResult | None = None
@@ -137,6 +171,33 @@ class FrontendJobResult(BaseModel):
     decisions: list[InoutDecision] = Field(default_factory=list)
     artifacts: ArtifactUrls = Field(default_factory=ArtifactUrls)
     error: str | None = None
+
+
+class SavedJudgementResponse(BaseModel):
+    id: str
+    session_id: str | None = None
+    job_id: str
+    created_at: str
+    recorded_at: str
+    recorded_date: str | None = None
+    match_type: Literal["singles", "doubles"]
+    decision: str
+    is_in: bool | None = None
+    decision_reason: str | None = None
+    video_path: str | None = None
+    video_url: str | None = None
+    clip_path: str | None = None
+    clip_url: str | None = None
+    result_video_url: str | None = None
+    inout_overlay_video_url: str | None = None
+    inout_csv_url: str | None = None
+    confidence: float | None = None
+    primary_bounce: dict[str, Any] | None = None
+    primary_decision: dict[str, Any] | None = None
+
+
+class SavedJudgementDetail(SavedJudgementResponse):
+    job_result: dict[str, Any]
 
 
 def session_dir(session_id: str) -> Path:
@@ -178,9 +239,19 @@ def write_job(session_id: str, job: dict[str, Any]) -> None:
     write_json(job_meta_path(session_id, job["job_id"]), job)
 
 
+def find_job(job_id: str) -> dict[str, Any]:
+    for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
+        return read_json(path)
+    raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
+
+
 def relative_file_url(path: Path) -> str:
     rel = path.resolve().relative_to(OUTPUT_ROOT.resolve())
     return "/files/" + rel.as_posix()
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def torch_available() -> bool:
@@ -614,13 +685,31 @@ def run_judgement_job(session_id: str, job_id: str) -> None:
     write_job(session_id, job)
 
 
+def frontend_decision_from_job(job: dict[str, Any]) -> tuple[str | None, bool | None]:
+    inout = job.get("inout") or {}
+    primary_decision = inout.get("primary_decision")
+    if not isinstance(primary_decision, dict):
+        return None, None
+
+    raw_decision = primary_decision.get("decision")
+    if raw_decision is None:
+        return None, None
+
+    decision = str(raw_decision).upper()
+    is_in = decision == "IN" if decision in {"IN", "OUT"} else None
+    return decision, is_in
+
+
 def build_frontend_job_result(job: dict[str, Any]) -> dict[str, Any]:
     inout = job.get("inout") or {}
+    decision, is_in = frontend_decision_from_job(job)
     return {
         "job_id": job.get("job_id"),
         "session_id": job.get("session_id"),
         "status": job.get("status"),
         "result": job.get("result"),
+        "decision": decision,
+        "is_in": is_in,
         "confidence": job.get("confidence"),
         "timing": job.get("timing"),
         "primary_bounce": job.get("primary_bounce"),
@@ -632,12 +721,163 @@ def build_frontend_job_result(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@app.get("/health")
+def latest_job_for_session(session_id: str) -> dict[str, Any] | None:
+    jobs_dir = session_dir(session_id) / "jobs"
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for path in jobs_dir.glob("*/job.json"):
+        try:
+            candidates.append((path.stat().st_mtime, read_json(path)))
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+
+    done_jobs = [candidate for candidate in candidates if candidate[1].get("status") == "done"]
+    return max(done_jobs or candidates, key=lambda candidate: candidate[0])[1]
+
+
+def resolve_session_save_job(session_id: str, job_id: str | None) -> dict[str, Any]:
+    if job_id:
+        path = job_meta_path(session_id, job_id)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"unknown job_id for session: {job_id}")
+        job = read_json(path)
+    else:
+        job = latest_job_for_session(session_id)
+        if job is None:
+            raise HTTPException(status_code=409, detail="session has no judgement job to save")
+
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"job is not done: {job.get('status')}")
+    return job
+
+
+def is_in_from_decision(decision: str | None) -> bool | None:
+    if decision is None:
+        return None
+    normalized = decision.upper()
+    if normalized not in {"IN", "OUT"}:
+        return None
+    return normalized == "IN"
+
+
+def saved_response(record: dict[str, Any], include_job_result: bool) -> dict[str, Any]:
+    decision = record.get("decision")
+    return {
+        "id": record["id"],
+        "session_id": record.get("session_id"),
+        "job_id": record["job_id"],
+        "created_at": record["created_at"],
+        "recorded_at": record["recorded_at"],
+        "recorded_date": record.get("recorded_date"),
+        "match_type": record["match_type"],
+        "decision": decision,
+        "is_in": is_in_from_decision(decision),
+        "decision_reason": record.get("decision_reason"),
+        "video_path": record.get("video_path"),
+        "video_url": record.get("video_url"),
+        "clip_path": record.get("clip_path"),
+        "clip_url": record.get("clip_url"),
+        "result_video_url": record.get("result_video_url"),
+        "inout_overlay_video_url": record.get("inout_overlay_video_url"),
+        "inout_csv_url": record.get("inout_csv_url"),
+        "confidence": record.get("confidence"),
+        "primary_bounce": record.get("primary_bounce"),
+        "primary_decision": record.get("primary_decision"),
+        **({"job_result": record["job_result"]} if include_job_result else {}),
+    }
+
+
+def resolve_recorded_at(session: dict[str, Any], request: SaveJudgementRequest, created_at: str) -> tuple[str, str]:
+    if request.recorded_at:
+        recorded_at = request.recorded_at.isoformat()
+        recorded_date = request.recorded_date.isoformat() if request.recorded_date else recorded_at[:10]
+        return recorded_at, recorded_date
+
+    if request.recorded_date:
+        recorded_date = request.recorded_date.isoformat()
+        return f"{recorded_date}T00:00:00", recorded_date
+
+    session_recorded_at = session.get("recorded_at")
+    if isinstance(session_recorded_at, str) and session_recorded_at:
+        return session_recorded_at, session_recorded_at[:10]
+
+    return created_at, created_at[:10]
+
+
+def build_saved_judgement_record(job: dict[str, Any], request: SaveJudgementRequest) -> dict[str, Any]:
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"job is not done: {job.get('status')}")
+
+    result = build_frontend_job_result(job)
+    primary_decision = result.get("primary_decision") or {}
+    primary_bounce = result.get("primary_bounce")
+    decision = primary_decision.get("decision") or result.get("decision") or "UNKNOWN"
+    decision_reason = primary_decision.get("decision_reason")
+    artifacts = result.get("artifacts") or {}
+
+    session_id = job.get("session_id")
+    session = read_session(session_id) if session_id else {}
+    recording = session.get("recording") if isinstance(session.get("recording"), dict) else {}
+    video_path = session.get("recording_path")
+    clip_path = None
+    if session_id:
+        candidate = job_dir(session_id, job["job_id"]) / "clip.mp4"
+        if candidate.exists():
+            clip_path = str(candidate)
+
+    created_at = utc_now_iso()
+    recorded_at, recorded_date = resolve_recorded_at(session, request, created_at)
+    return {
+        "id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "job_id": job["job_id"],
+        "created_at": created_at,
+        "recorded_at": recorded_at,
+        "recorded_date": recorded_date,
+        "match_type": request.match_type,
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "video_path": video_path,
+        "video_url": recording.get("url"),
+        "clip_path": clip_path,
+        "clip_url": artifacts.get("clip"),
+        "result_video_url": artifacts.get("result_video"),
+        "inout_overlay_video_url": artifacts.get("inout_overlay_video"),
+        "inout_csv_url": artifacts.get("inout_csv"),
+        "confidence": result.get("confidence"),
+        "primary_bounce_json": encode_json(primary_bounce),
+        "primary_decision_json": encode_json(primary_decision),
+        "job_result_json": encode_json(result),
+    }
+
+
+def build_minimal_court_config_record(record: dict[str, Any]) -> dict[str, Any]:
+    lines = []
+    for line in record.get("lines", []):
+        minimal_line = {}
+        if "name" in line:
+            minimal_line["name"] = line["name"]
+        minimal_line["points"] = line.get("points", [])
+        lines.append(minimal_line)
+
+    return {
+        "image": record.get("image", ""),
+        "width": record.get("width"),
+        "height": record.get("height"),
+        "view": record.get("view") or record.get("mode"),
+        "view_side": record.get("view_side"),
+        "lines": lines,
+    }
+
+
+@app.get("/health", tags=["상태"], summary="서버 상태 확인")
 def health() -> dict[str, Any]:
     return runtime_health()
 
 
-@app.post("/sessions/start", response_model=SessionResponse)
+@app.post("/sessions/start", response_model=SessionResponse, tags=["세션"], summary="세션 시작")
 def start_session(request: SessionStartRequest) -> SessionResponse:
     session_id = str(uuid.uuid4())
     session = {
@@ -645,17 +885,22 @@ def start_session(request: SessionStartRequest) -> SessionResponse:
         "status": "created",
         "camera_label": request.camera_label,
         "recording_path": None,
+        "created_at": utc_now_iso(),
     }
     write_session(session)
     return SessionResponse(**session)
 
 
-@app.get("/sessions/{session_id}")
+@app.get("/sessions/{session_id}", tags=["세션"], summary="세션 조회")
 def get_session(session_id: str) -> dict[str, Any]:
     return read_session(session_id)
 
 
-@app.post("/sessions/{session_id}/line-status")
+@app.post(
+    "/sessions/{session_id}/line-status",
+    tags=["라인 인식"],
+    summary="라인 안정화 체크",
+)
 def line_status(
     session_id: str,
     frame: UploadFile = File(...),
@@ -694,7 +939,11 @@ def line_status(
     return response
 
 
-@app.post("/sessions/{session_id}/court-config/detect")
+@app.post(
+    "/sessions/{session_id}/court-config/detect",
+    tags=["라인 인식"],
+    summary="라인 JSON 자동 생성",
+)
 def detect_court_config(
     session_id: str,
     frame: UploadFile = File(...),
@@ -717,7 +966,7 @@ def detect_court_config(
         raise HTTPException(status_code=422, detail=f"court line detection failed: {exc}") from exc
 
     config_path = session_dir(session_id) / "court_config_detected.json"
-    court_config = [record]
+    court_config = [build_minimal_court_config_record(record)]
     write_json(config_path, court_config)
 
     session["court_config_path"] = str(config_path)
@@ -748,7 +997,11 @@ def detect_court_config(
     }
 
 
-@app.post("/sessions/{session_id}/court-config/upload")
+@app.post(
+    "/sessions/{session_id}/court-config/upload",
+    tags=["라인 인식"],
+    summary="라인 JSON 업로드",
+)
 def upload_court_config(
     session_id: str,
     config: UploadFile = File(...),
@@ -776,7 +1029,11 @@ def upload_court_config(
     }
 
 
-@app.post("/sessions/{session_id}/court-config/path")
+@app.post(
+    "/sessions/{session_id}/court-config/path",
+    tags=["라인 인식"],
+    summary="라인 JSON 경로 등록",
+)
 def set_court_config_path(session_id: str, request: CourtConfigPathRequest) -> dict[str, Any]:
     session = read_session(session_id)
     config_path = Path(request.path)
@@ -798,7 +1055,7 @@ def set_court_config_path(session_id: str, request: CourtConfigPathRequest) -> d
     }
 
 
-@app.post("/sessions/{session_id}/record/start")
+@app.post("/sessions/{session_id}/record/start", tags=["녹화"], summary="녹화 시작")
 def record_start(session_id: str) -> dict[str, str]:
     session = read_session(session_id)
     session["status"] = "recording"
@@ -806,7 +1063,7 @@ def record_start(session_id: str) -> dict[str, str]:
     return {"session_id": session_id, "status": "recording"}
 
 
-@app.post("/sessions/{session_id}/record/upload")
+@app.post("/sessions/{session_id}/record/upload", tags=["녹화"], summary="녹화 영상 업로드")
 def upload_recording(session_id: str, video: UploadFile = File(...)) -> dict[str, Any]:
     session = read_session(session_id)
     suffix = Path(video.filename or "recording.mp4").suffix or ".mp4"
@@ -819,11 +1076,12 @@ def upload_recording(session_id: str, video: UploadFile = File(...)) -> dict[str
         "url": relative_file_url(recording_path),
     }
     session["status"] = "recorded"
+    session["recorded_at"] = utc_now_iso()
     write_session(session)
     return {"session_id": session_id, "recording": session["recording"]}
 
 
-@app.post("/sessions/{session_id}/record/path")
+@app.post("/sessions/{session_id}/record/path", tags=["녹화"], summary="녹화 영상 경로 등록")
 def set_recording_path(session_id: str, request: RecordPathRequest) -> dict[str, Any]:
     session = read_session(session_id)
     recording_path = Path(request.path)
@@ -832,11 +1090,12 @@ def set_recording_path(session_id: str, request: RecordPathRequest) -> dict[str,
     session["recording_path"] = str(recording_path)
     session["recording"] = video_info(recording_path)
     session["status"] = "recorded"
+    session["recorded_at"] = utc_now_iso()
     write_session(session)
     return {"session_id": session_id, "recording": session["recording"]}
 
 
-@app.post("/sessions/{session_id}/record/stop")
+@app.post("/sessions/{session_id}/record/stop", tags=["녹화"], summary="녹화 중지")
 def record_stop(session_id: str) -> dict[str, str]:
     session = read_session(session_id)
     session["status"] = "stopped"
@@ -844,7 +1103,12 @@ def record_stop(session_id: str) -> dict[str, str]:
     return {"session_id": session_id, "status": "stopped"}
 
 
-@app.post("/sessions/{session_id}/judge", response_model=JudgeQueuedResponse)
+@app.post(
+    "/sessions/{session_id}/judge",
+    response_model=JudgeQueuedResponse,
+    tags=["판정"],
+    summary="세션 영상 판정 Job 생성",
+)
 def judge(session_id: str, request: JudgeRequest, background_tasks: BackgroundTasks) -> JudgeQueuedResponse:
     session = read_session(session_id)
     if not session.get("recording_path"):
@@ -869,13 +1133,19 @@ def judge(session_id: str, request: JudgeRequest, background_tasks: BackgroundTa
     return JudgeQueuedResponse(job_id=job_id, status="pending")
 
 
-@app.post("/judge-preprocess", response_model=JudgeQueuedResponse)
+@app.post(
+    "/judge-preprocess",
+    response_model=JudgeQueuedResponse,
+    tags=["판정"],
+    summary="로컬 경로 영상 판정 Job 생성",
+)
 def judge_preprocess(request: JudgePreprocessRequest, background_tasks: BackgroundTasks) -> JudgeQueuedResponse:
     recording_path = Path(request.recording_path)
     if not recording_path.exists():
         raise HTTPException(status_code=404, detail=f"recording not found: {recording_path}")
 
     session_id = request.session_id or str(uuid.uuid4())
+    recorded_at = utc_now_iso()
     session = {
         "session_id": session_id,
         "status": "recorded",
@@ -885,6 +1155,8 @@ def judge_preprocess(request: JudgePreprocessRequest, background_tasks: Backgrou
         "court_config_path": request.court_config_path,
         "config_image": request.config_image,
         "config_index": request.config_index,
+        "created_at": recorded_at,
+        "recorded_at": recorded_at,
     }
     write_session(session)
 
@@ -908,29 +1180,94 @@ def judge_preprocess(request: JudgePreprocessRequest, background_tasks: Backgrou
     return JudgeQueuedResponse(job_id=job_id, status="pending")
 
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", tags=["작업 결과"], summary="Job 상세 조회")
 def get_job(job_id: str) -> dict[str, Any]:
-    for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
-        return read_json(path)
-    raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
+    return find_job(job_id)
 
 
-@app.get("/jobs/{job_id}/result", response_model=FrontendJobResult)
+@app.get(
+    "/jobs/{job_id}/result",
+    response_model=FrontendJobResult,
+    tags=["작업 결과"],
+    summary="프론트용 Job 결과 조회",
+)
 def get_job_result(job_id: str) -> FrontendJobResult:
-    for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
-        return FrontendJobResult(**build_frontend_job_result(read_json(path)))
-    raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
+    return FrontendJobResult(**build_frontend_job_result(find_job(job_id)))
 
 
-@app.post("/sessions/{session_id}/save")
-def save_session(session_id: str) -> dict[str, str]:
+@app.post(
+    "/jobs/{job_id}/save",
+    response_model=SavedJudgementDetail,
+    tags=["저장"],
+    summary="Job 판정 결과 저장",
+)
+def save_job_result(job_id: str, request: SaveJudgementRequest) -> SavedJudgementDetail:
+    job = find_job(job_id)
+    record = insert_judgement_record(build_saved_judgement_record(job, request))
+    return SavedJudgementDetail(**saved_response(record, include_job_result=True))
+
+
+@app.get(
+    "/judgements",
+    response_model=list[SavedJudgementResponse],
+    tags=["저장"],
+    summary="저장된 판정 목록 조회",
+)
+def list_saved_judgements(
+    match_type: Literal["singles", "doubles"] | None = None,
+    decision: str | None = None,
+    recorded_date: date | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 50,
+) -> list[SavedJudgementResponse]:
+    limit = max(1, min(limit, 200))
+    records = list_judgement_records(
+        match_type=match_type,
+        decision=decision.upper() if decision else None,
+        recorded_date=recorded_date.isoformat() if recorded_date else None,
+        date_from=date_from.isoformat() if date_from else None,
+        date_to=date_to.isoformat() if date_to else None,
+        limit=limit,
+    )
+    return [
+        SavedJudgementResponse(**saved_response(record, include_job_result=False))
+        for record in records
+    ]
+
+
+@app.get(
+    "/judgements/{record_id}",
+    response_model=SavedJudgementDetail,
+    tags=["저장"],
+    summary="저장된 판정 상세 조회",
+)
+def get_saved_judgement(record_id: str) -> SavedJudgementDetail:
+    record = get_judgement_record(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"unknown judgement id: {record_id}")
+    return SavedJudgementDetail(**saved_response(record, include_job_result=True))
+
+
+@app.post(
+    "/sessions/{session_id}/save",
+    response_model=SavedJudgementDetail,
+    tags=["저장"],
+    summary="세션 최신 판정 결과 저장",
+)
+def save_session(session_id: str, request: SaveSessionJudgementRequest) -> SavedJudgementDetail:
     session = read_session(session_id)
+    job = resolve_session_save_job(session_id, request.job_id)
+    record = insert_judgement_record(build_saved_judgement_record(job, request))
     session["saved"] = True
+    session["saved_at"] = record["created_at"]
+    session["saved_job_id"] = record["job_id"]
+    session["saved_record_id"] = record["id"]
     write_session(session)
-    return {"session_id": session_id, "status": "saved"}
+    return SavedJudgementDetail(**saved_response(record, include_job_result=True))
 
 
-@app.post("/sessions/{session_id}/finish")
+@app.post("/sessions/{session_id}/finish", tags=["저장"], summary="세션 종료")
 def finish_session(session_id: str) -> dict[str, str]:
     session = read_session(session_id)
     session["status"] = "finished"
