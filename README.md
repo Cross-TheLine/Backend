@@ -112,6 +112,7 @@ outputs/xyline_yball_bounces/mid_y_bounces.avi
 ## 4. Judge In/Out
 
 view2 line JSON으로 코트 안쪽 polygon을 만들고, bounce 좌표가 그 안에 있으면 `IN`, 밖이면 `OUT`으로 판정합니다.
+view3 line JSON은 한 개의 끝-끝 라인과 `view_side`/`inside_point`를 사용해 안쪽 half-plane polygon을 만든 뒤 같은 방식으로 판정합니다.
 
 ```powershell
 python -m src.inout_judgement.judge_in_out --input .\outputs\xyline_yball_bounces\mid_y_bounces.csv --court_config .\outputs\xyline_yball_view2_lines.json --output_root .\outputs\xyline_yball_inout --x_column x --y_column y --config_image mid_frame0.png

@@ -96,7 +96,7 @@ def line_endpoints(line):
         line.get('segment_endpoints')
     )
     if points is None or len(points) != 2:
-        raise ValueError(f'View2 line needs two endpoints: {line}')
+        raise ValueError(f'Line needs two endpoints: {line}')
     return [as_point(point) for point in points]
 
 
@@ -173,6 +173,108 @@ def scale_point(point, scale_x, scale_y):
     return float(point[0]) * scale_x, float(point[1]) * scale_y
 
 
+def frame_border_intersections(line_start, line_end, width, height):
+    x1, y1 = line_start
+    x2, y2 = line_end
+    dx = x2 - x1
+    dy = y2 - y1
+    candidates = []
+
+    if abs(dx) > 1e-9:
+        for x in (0.0, width - 1.0):
+            t = (x - x1) / dx
+            y = y1 + t * dy
+            if 0.0 <= y <= height - 1.0:
+                candidates.append((float(x), float(y)))
+    if abs(dy) > 1e-9:
+        for y in (0.0, height - 1.0):
+            t = (y - y1) / dy
+            x = x1 + t * dx
+            if 0.0 <= x <= width - 1.0:
+                candidates.append((float(x), float(y)))
+
+    unique = []
+    for point in candidates:
+        if not any(math.hypot(point[0] - kept[0], point[1] - kept[1]) < 1e-4 for kept in unique):
+            unique.append(point)
+
+    if len(unique) < 2:
+        return None
+
+    best = None
+    best_dist = -1.0
+    for idx, start in enumerate(unique):
+        for end in unique[idx + 1:]:
+            dist = math.hypot(start[0] - end[0], start[1] - end[1])
+            if dist > best_dist:
+                best = (start, end)
+                best_dist = dist
+    return sorted(best, key=lambda point: (point[1], point[0]))
+
+
+def rectangle_polygon(width, height):
+    return [
+        (0.0, 0.0),
+        (width - 1.0, 0.0),
+        (width - 1.0, height - 1.0),
+        (0.0, height - 1.0),
+    ]
+
+
+def clip_polygon_to_line_side(polygon, line_start, line_end, keep_positive):
+    def side(point):
+        return signed_distance_to_line(point, line_start, line_end)
+
+    def is_inside(point):
+        value = side(point)
+        return value >= -1e-6 if keep_positive else value <= 1e-6
+
+    def intersection(start, end):
+        start_side = side(start)
+        end_side = side(end)
+        denom = start_side - end_side
+        if abs(denom) < 1e-9:
+            return end
+        ratio = start_side / denom
+        return (
+            start[0] + (end[0] - start[0]) * ratio,
+            start[1] + (end[1] - start[1]) * ratio,
+        )
+
+    output = list(polygon)
+    clipped = []
+    for idx, current in enumerate(output):
+        previous = output[idx - 1]
+        current_inside = is_inside(current)
+        previous_inside = is_inside(previous)
+        if current_inside:
+            if not previous_inside:
+                clipped.append(intersection(previous, current))
+            clipped.append(current)
+        elif previous_inside:
+            clipped.append(intersection(previous, current))
+
+    deduped = []
+    for point in clipped:
+        if not deduped or math.hypot(point[0] - deduped[-1][0], point[1] - deduped[-1][1]) > 1e-4:
+            deduped.append(point)
+    if len(deduped) > 1 and math.hypot(deduped[0][0] - deduped[-1][0], deduped[0][1] - deduped[-1][1]) < 1e-4:
+        deduped.pop()
+    return deduped
+
+
+def inside_point_from_record(record):
+    if 'inside_point' in record:
+        return as_point(record['inside_point'])
+
+    roles = record.get('roles')
+    if isinstance(roles, dict):
+        inside_marker = roles.get('inside_marker')
+        if isinstance(inside_marker, dict) and 'center' in inside_marker:
+            return as_point(inside_marker['center'])
+    return None
+
+
 def view2_lines_to_polygon_config(record, target_width=None, target_height=None):
     width, height = frame_size_from_record(record)
     target_width = width if target_width is None else float(target_width)
@@ -220,6 +322,64 @@ def view2_lines_to_polygon_config(record, target_width=None, target_height=None)
     }
 
 
+def view3_lines_to_polygon_config(record, target_width=None, target_height=None):
+    width, height = frame_size_from_record(record)
+    target_width = width if target_width is None else float(target_width)
+    target_height = height if target_height is None else float(target_height)
+    scale_x = target_width / width
+    scale_y = target_height / height
+
+    lines = record.get('lines', [])
+    if len(lines) != 1:
+        raise ValueError('View3 config must contain exactly one line')
+
+    raw_start, raw_end = line_endpoints(lines[0])
+    scaled_start = scale_point(raw_start, scale_x, scale_y)
+    scaled_end = scale_point(raw_end, scale_x, scale_y)
+    border_line = frame_border_intersections(scaled_start, scaled_end, target_width, target_height)
+    if border_line is None:
+        line_start, line_end = sorted([scaled_start, scaled_end], key=lambda point: (point[1], point[0]))
+    else:
+        line_start, line_end = border_line
+
+    inside_point = inside_point_from_record(record)
+    if inside_point is not None:
+        scaled_inside = scale_point(inside_point, scale_x, scale_y)
+        keep_positive = signed_distance_to_line(scaled_inside, line_start, line_end) >= 0
+    else:
+        view_side = (record.get('view_side') or '').lower()
+        if view_side == 'left':
+            keep_positive = True
+        elif view_side == 'right':
+            keep_positive = False
+        else:
+            raise ValueError('View3 config needs view_side or inside_point')
+        scaled_inside = ''
+
+    polygon = clip_polygon_to_line_side(
+        rectangle_polygon(target_width, target_height),
+        line_start,
+        line_end,
+        keep_positive,
+    )
+    if len(polygon) < 3:
+        raise ValueError('Could not build a view3 in/out polygon')
+
+    return {
+        'mode': 'polygon',
+        'court_polygon': [[round(x, 3), round(y, 3)] for x, y in polygon],
+        'line_tolerance_px': 3.0,
+        'source_mode': 'view3_lines',
+        'source_image': record.get('image', ''),
+        'source_view_side': record.get('view_side', ''),
+        'source_size': [width, height],
+        'target_size': [target_width, target_height],
+        'view3_line': [[round(line_start[0], 3), round(line_start[1], 3)],
+                       [round(line_end[0], 3), round(line_end[1], 3)]],
+        'view3_inside_point': scaled_inside,
+    }
+
+
 def normalize_config(data, args):
     if isinstance(data, dict) and data.get('mode') in {'polygon', 'line'}:
         return data
@@ -237,7 +397,9 @@ def normalize_config(data, args):
         target_height=target_height,
     )
     if not (record.get('view') == 'view2' or record.get('mode') == 'view2'):
-        raise ValueError('Only polygon/line configs and view2 line records are supported')
+        if record.get('view') == 'view3' or record.get('mode') == 'view3':
+            return view3_lines_to_polygon_config(record, target_width, target_height)
+        raise ValueError('Only polygon/line configs and view2/view3 line records are supported')
     return view2_lines_to_polygon_config(record, target_width, target_height)
 
 
@@ -410,9 +572,10 @@ def main():
     args = parser.parse_args()
 
     config = normalize_config(load_json(args.court_config), args)
-    if config.get('source_mode') == 'view2_lines':
+    if config.get('source_mode') in {'view2_lines', 'view3_lines'}:
         print(
-            'court_config=view2_lines image={} source_size={} target_size={}'.format(
+            'court_config={} image={} source_size={} target_size={}'.format(
+                config.get('source_mode', ''),
                 config.get('source_image', ''),
                 config.get('source_size', ''),
                 config.get('target_size', ''),

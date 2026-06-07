@@ -43,6 +43,12 @@ def rounded_point(point: list[float] | np.ndarray) -> list[float]:
     return [round(float(point[0]), 2), round(float(point[1]), 2)]
 
 
+def signed_line_side(point: np.ndarray, line_start: np.ndarray, line_end: np.ndarray) -> float:
+    dx = float(line_end[0] - line_start[0])
+    dy = float(line_end[1] - line_start[1])
+    return float((point[0] - line_start[0]) * dy - (point[1] - line_start[1]) * dx)
+
+
 def detect_apriltags(image: np.ndarray, min_side_px: float) -> list[dict]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     params = cv2.aruco.DetectorParameters()
@@ -248,7 +254,7 @@ def build_view3_line(
     image_shape: tuple[int, int, int],
     roles: dict[str, dict],
     vertical_weight: float,
-) -> dict:
+) -> tuple[dict, str]:
     height, width = image_shape[:2]
     line_top = roles["line_marker_top"]
     line_bottom = roles["line_marker_bottom"]
@@ -258,12 +264,21 @@ def build_view3_line(
     top_endpoint = selected["top_points"].mean(axis=0)
     bottom_endpoint = selected["bottom_points"].mean(axis=0)
     border = line_border_intersections(selected["point_on_line"], selected["direction"], width, height)
-    extended = ray_endpoints(border, bottom_endpoint, top_endpoint)
+    if border is None:
+        endpoints = [rounded_point(top_endpoint), rounded_point(bottom_endpoint)]
+    else:
+        endpoints = sorted(border, key=lambda point: (point[1], point[0]))
+
+    line_start = np.array(endpoints[0], dtype=np.float32)
+    line_end = np.array(endpoints[1], dtype=np.float32)
+    inside_center = np.array(inside_marker["center"], dtype=np.float32)
+    inside_side = signed_line_side(inside_center, line_start, line_end)
+    view_side = "left" if inside_side > 0 else "right"
 
     return {
         "name": "view3_vertical_outer_line",
-        "points": extended or [rounded_point(top_endpoint), rounded_point(bottom_endpoint)],
-    }
+        "points": [rounded_point(point) for point in endpoints],
+    }, view_side
 
 
 def process_image(
@@ -276,12 +291,14 @@ def process_image(
     height, width = image.shape[:2]
     markers = detect_apriltags(image, min_side_px)
     roles, _ = select_view3_roles(markers, line_marker_ids)
-    line = build_view3_line(image.shape, roles, vertical_weight)
+    line, view_side = build_view3_line(image.shape, roles, vertical_weight)
     return {
         "image": str(path),
         "width": width,
         "height": height,
         "view": "view3",
+        "view_side": view_side,
+        "inside_point": rounded_point(roles["inside_marker"]["center"]),
         "lines": [line],
     }
 
