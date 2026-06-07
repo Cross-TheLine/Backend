@@ -163,6 +163,10 @@ class FrontendJobResult(BaseModel):
     result: str | None = None
     decision: str | None = None
     is_in: bool | None = None
+    failure_type: str | None = None
+    failure_reason: str | None = None
+    video_readable: bool | None = None
+    recording_accessible: bool | None = None
     confidence: float | None = None
     timing: dict[str, Any] | None = None
     primary_bounce: BounceResult | None = None
@@ -614,6 +618,12 @@ def run_preprocess(
         )
         artifacts.update(inout["artifacts"])
 
+    failure_type, failure_reason = classify_detection_issue(
+        primary_bounce=primary_bounce,
+        court_config_path=court_config_path,
+        inout=inout,
+    )
+
     return {
         "clip": {
             "start_sec": start_sec,
@@ -621,6 +631,9 @@ def run_preprocess(
             **clip_info,
         },
         "result": "bounce_detected" if primary_bounce is not None else "unknown",
+        "failure_type": failure_type,
+        "failure_reason": failure_reason,
+        "video_readable": True,
         "confidence": confidence,
         "primary_bounce": primary_bounce,
         "bounces": bounces_payload,
@@ -657,6 +670,9 @@ def run_judgement_job(session_id: str, job_id: str) -> None:
 
         session = read_session(session_id)
         source_path = Path(session["recording_path"])
+        job["recording_path"] = str(source_path)
+        job["recording_accessible"] = source_path.exists()
+        write_job(session_id, job)
         pressed_at_sec, timing = resolve_pressed_at_sec(
             source_path=source_path,
             pressed_at_sec=job.get("pressed_at_sec"),
@@ -680,7 +696,13 @@ def run_judgement_job(session_id: str, job_id: str) -> None:
         )
         job.update({"status": "done", **result})
     except Exception as exc:
+        failure_type, failure_reason = classify_processing_exception(exc)
         job["status"] = "failed"
+        job["result"] = "failed"
+        job["failure_type"] = failure_type
+        job["failure_reason"] = failure_reason
+        if failure_type == "video_unreadable":
+            job["video_readable"] = False
         job["error"] = str(exc)
     write_job(session_id, job)
 
@@ -700,6 +722,35 @@ def frontend_decision_from_job(job: dict[str, Any]) -> tuple[str | None, bool | 
     return decision, is_in
 
 
+def classify_processing_exception(exc: Exception) -> tuple[str, str]:
+    message = str(exc)
+    lowered = message.lower()
+    if (
+        "could not open video" in lowered
+        or "clip range is empty" in lowered
+        or "clip has no readable frames" in lowered
+        or "no frames were written to clip" in lowered
+    ):
+        return "video_unreadable", message
+    if "court config" in lowered:
+        return "line_config_unavailable", message
+    return "processing_error", message
+
+
+def classify_detection_issue(
+    primary_bounce: dict[str, Any] | None,
+    court_config_path: Path | None,
+    inout: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    if primary_bounce is None:
+        return "detection_unavailable", "ball_bounce_not_detected"
+    if court_config_path is None:
+        return "line_config_unavailable", "court_config_missing"
+    if inout is not None and inout.get("primary_decision") is None:
+        return "detection_unavailable", "inout_decision_not_available"
+    return None, None
+
+
 def build_frontend_job_result(job: dict[str, Any]) -> dict[str, Any]:
     inout = job.get("inout") or {}
     decision, is_in = frontend_decision_from_job(job)
@@ -710,6 +761,10 @@ def build_frontend_job_result(job: dict[str, Any]) -> dict[str, Any]:
         "result": job.get("result"),
         "decision": decision,
         "is_in": is_in,
+        "failure_type": job.get("failure_type"),
+        "failure_reason": job.get("failure_reason"),
+        "video_readable": job.get("video_readable"),
+        "recording_accessible": job.get("recording_accessible"),
         "confidence": job.get("confidence"),
         "timing": job.get("timing"),
         "primary_bounce": job.get("primary_bounce"),
@@ -968,14 +1023,15 @@ def detect_court_config(
     config_path = session_dir(session_id) / "court_config_detected.json"
     court_config = [build_minimal_court_config_record(record)]
     write_json(config_path, court_config)
+    resolved_config_path = config_path.resolve()
 
-    session["court_config_path"] = str(config_path)
+    session["court_config_path"] = str(resolved_config_path)
     session["config_image"] = None
     session["config_index"] = 0
     session["court_config_detection"] = {
         "frame_path": str(frame_path),
         "frame_url": relative_file_url(frame_path),
-        "court_config_path": str(config_path),
+        "court_config_path": str(resolved_config_path),
         "court_config_url": relative_file_url(config_path),
         "schema": record.get("schema"),
         "mode": record.get("mode"),
@@ -987,7 +1043,7 @@ def detect_court_config(
 
     return {
         "session_id": session_id,
-        "court_config_path": str(config_path),
+        "court_config_path": str(resolved_config_path),
         "config_image": None,
         "config_index": 0,
         "url": relative_file_url(config_path),
@@ -1016,13 +1072,14 @@ def upload_court_config(
         load_json(config_path)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid court config JSON: {exc}") from exc
-    session["court_config_path"] = str(config_path)
+    resolved_config_path = config_path.resolve()
+    session["court_config_path"] = str(resolved_config_path)
     session["config_image"] = config_image
     session["config_index"] = config_index
     write_session(session)
     return {
         "session_id": session_id,
-        "court_config_path": str(config_path),
+        "court_config_path": str(resolved_config_path),
         "config_image": config_image,
         "config_index": config_index,
         "url": relative_file_url(config_path),
@@ -1036,7 +1093,7 @@ def upload_court_config(
 )
 def set_court_config_path(session_id: str, request: CourtConfigPathRequest) -> dict[str, Any]:
     session = read_session(session_id)
-    config_path = Path(request.path)
+    config_path = Path(request.path).resolve()
     if not config_path.exists():
         raise HTTPException(status_code=404, detail=f"court config not found: {config_path}")
     try:
@@ -1069,10 +1126,17 @@ def upload_recording(session_id: str, video: UploadFile = File(...)) -> dict[str
     suffix = Path(video.filename or "recording.mp4").suffix or ".mp4"
     recording_path = session_dir(session_id) / f"recording{suffix}"
     save_upload(video, recording_path)
-    info = video_info(recording_path)
-    session["recording_path"] = str(recording_path)
+    resolved_recording_path = recording_path.resolve()
+    try:
+        info = video_info(resolved_recording_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=f"uploaded video is not readable: {exc}") from exc
+    session["recording_path"] = str(resolved_recording_path)
     session["recording"] = {
         **info,
+        "path": str(resolved_recording_path),
+        "accessible": resolved_recording_path.exists(),
+        "readable": True,
         "url": relative_file_url(recording_path),
     }
     session["status"] = "recorded"
@@ -1084,11 +1148,20 @@ def upload_recording(session_id: str, video: UploadFile = File(...)) -> dict[str
 @app.post("/sessions/{session_id}/record/path", tags=["녹화"], summary="녹화 영상 경로 등록")
 def set_recording_path(session_id: str, request: RecordPathRequest) -> dict[str, Any]:
     session = read_session(session_id)
-    recording_path = Path(request.path)
+    recording_path = Path(request.path).resolve()
     if not recording_path.exists():
         raise HTTPException(status_code=404, detail=f"recording not found: {recording_path}")
+    try:
+        info = video_info(recording_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=f"recording is not readable: {exc}") from exc
     session["recording_path"] = str(recording_path)
-    session["recording"] = video_info(recording_path)
+    session["recording"] = {
+        **info,
+        "path": str(recording_path),
+        "accessible": recording_path.exists(),
+        "readable": True,
+    }
     session["status"] = "recorded"
     session["recorded_at"] = utc_now_iso()
     write_session(session)
@@ -1140,9 +1213,13 @@ def judge(session_id: str, request: JudgeRequest, background_tasks: BackgroundTa
     summary="로컬 경로 영상 판정 Job 생성",
 )
 def judge_preprocess(request: JudgePreprocessRequest, background_tasks: BackgroundTasks) -> JudgeQueuedResponse:
-    recording_path = Path(request.recording_path)
+    recording_path = Path(request.recording_path).resolve()
     if not recording_path.exists():
         raise HTTPException(status_code=404, detail=f"recording not found: {recording_path}")
+    try:
+        recording_info = video_info(recording_path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=f"recording is not readable: {exc}") from exc
 
     session_id = request.session_id or str(uuid.uuid4())
     recorded_at = utc_now_iso()
@@ -1151,7 +1228,12 @@ def judge_preprocess(request: JudgePreprocessRequest, background_tasks: Backgrou
         "status": "recorded",
         "camera_label": None,
         "recording_path": str(recording_path),
-        "recording": video_info(recording_path),
+        "recording": {
+            **recording_info,
+            "path": str(recording_path),
+            "accessible": recording_path.exists(),
+            "readable": True,
+        },
         "court_config_path": request.court_config_path,
         "config_image": request.config_image,
         "config_index": request.config_index,

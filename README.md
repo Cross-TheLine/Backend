@@ -137,6 +137,10 @@ Frontend result response:
   "result": "bounce_detected",
   "decision": "IN",
   "is_in": true,
+  "failure_type": null,
+  "failure_reason": null,
+  "video_readable": true,
+  "recording_accessible": true,
   "confidence": 0.8,
   "primary_bounce": {
     "frame_index": 38,
