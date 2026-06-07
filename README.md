@@ -187,6 +187,9 @@ POST /sessions/{session_id}/record/path
 POST /sessions/{session_id}/judge
 GET  /jobs/{job_id}
 GET  /jobs/{job_id}/result
+POST /jobs/{job_id}/save
+GET  /judgements
+GET  /judgements/{id}
 POST /sessions/{session_id}/save
 POST /sessions/{session_id}/finish
 ```
@@ -224,6 +227,54 @@ The backend saves the uploaded frame, detects AprilTag-guided view2 court lines,
 `court_config_detected.json`, and stores that path on the session. Later
 `POST /sessions/{session_id}/judge` automatically uses that detected config unless the
 judge request overrides `court_config_path`.
+
+### Save judgment records
+
+Use this after a job reaches `status=done` and the app needs to save the judged video
+record in history.
+
+```text
+POST /jobs/{job_id}/save
+```
+
+Request:
+
+```json
+{
+  "match_type": "singles",
+  "recorded_at": "2026-06-07T12:30:00+09:00",
+  "recorded_date": "2026-06-07"
+}
+```
+
+`match_type` must be `singles` or `doubles`. `recorded_at` and `recorded_date`
+are optional; if omitted, the backend stores the save time and save date.
+
+The saved SQLite record includes:
+
+- original uploaded video path and `/files` URL
+- judgment clip URL
+- saved date/time
+- match type: singles or doubles
+- primary IN/OUT decision and reason
+- primary bounce and full job result JSON
+
+Query saved records:
+
+```text
+GET /judgements
+GET /judgements?match_type=singles
+GET /judgements?decision=OUT
+GET /judgements?recorded_date=2026-06-07
+GET /judgements?date_from=2026-06-01&date_to=2026-06-07
+GET /judgements/{id}
+```
+
+Records are stored in:
+
+```text
+output/judgements.sqlite3
+```
 
 ## CLI Pipeline
 

@@ -6,15 +6,23 @@ import json
 import shutil
 import uuid
 from collections import Counter
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import cv2
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from src.api.database import (
+    encode_json,
+    get_judgement_record,
+    init_db,
+    insert_judgement_record,
+    list_judgement_records,
+)
 from src.inout_judgement.judge_in_out import judge_csv, load_json, normalize_config
 from src.inout_judgement.overlay_in_out import write_overlay_video
 from src.line_detection.detect_view2_apriltag_lines import (
@@ -31,6 +39,7 @@ DEFAULT_DEVICE = "auto"
 DEFAULT_LOOKBACK_SEC = 2.0
 
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+init_db()
 app = FastAPI(title="Cross The Line Backend", version="0.1.0")
 app.mount("/files", StaticFiles(directory=str(OUTPUT_ROOT), html=False), name="files")
 
@@ -139,6 +148,38 @@ class FrontendJobResult(BaseModel):
     error: str | None = None
 
 
+class SaveJudgementRequest(BaseModel):
+    match_type: Literal["singles", "doubles"]
+    recorded_at: datetime | None = None
+    recorded_date: date | None = None
+
+
+class SavedJudgementResponse(BaseModel):
+    id: str
+    session_id: str | None = None
+    job_id: str
+    created_at: str
+    recorded_at: str
+    recorded_date: str | None = None
+    match_type: Literal["singles", "doubles"]
+    decision: str
+    decision_reason: str | None = None
+    video_path: str | None = None
+    video_url: str | None = None
+    clip_path: str | None = None
+    clip_url: str | None = None
+    result_video_url: str | None = None
+    inout_overlay_video_url: str | None = None
+    inout_csv_url: str | None = None
+    confidence: float | None = None
+    primary_bounce: dict[str, Any] | None = None
+    primary_decision: dict[str, Any] | None = None
+
+
+class SavedJudgementDetail(SavedJudgementResponse):
+    job_result: dict[str, Any]
+
+
 def session_dir(session_id: str) -> Path:
     return OUTPUT_ROOT / session_id
 
@@ -176,6 +217,12 @@ def write_session(session: dict[str, Any]) -> None:
 
 def write_job(session_id: str, job: dict[str, Any]) -> None:
     write_json(job_meta_path(session_id, job["job_id"]), job)
+
+
+def find_job(job_id: str) -> dict[str, Any]:
+    for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
+        return read_json(path)
+    raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
 
 
 def relative_file_url(path: Path) -> str:
@@ -632,6 +679,93 @@ def build_frontend_job_result(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def saved_response(record: dict[str, Any], include_job_result: bool) -> dict[str, Any]:
+    response = {
+        "id": record["id"],
+        "session_id": record.get("session_id"),
+        "job_id": record["job_id"],
+        "created_at": record["created_at"],
+        "recorded_at": record["recorded_at"],
+        "recorded_date": record.get("recorded_date"),
+        "match_type": record["match_type"],
+        "decision": record["decision"],
+        "decision_reason": record.get("decision_reason"),
+        "video_path": record.get("video_path"),
+        "video_url": record.get("video_url"),
+        "clip_path": record.get("clip_path"),
+        "clip_url": record.get("clip_url"),
+        "result_video_url": record.get("result_video_url"),
+        "inout_overlay_video_url": record.get("inout_overlay_video_url"),
+        "inout_csv_url": record.get("inout_csv_url"),
+        "confidence": record.get("confidence"),
+        "primary_bounce": record.get("primary_bounce"),
+        "primary_decision": record.get("primary_decision"),
+    }
+    if include_job_result:
+        response["job_result"] = record["job_result"]
+    return response
+
+
+def build_saved_judgement_record(job: dict[str, Any], request: SaveJudgementRequest) -> dict[str, Any]:
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="job is not done")
+
+    result = build_frontend_job_result(job)
+    primary_decision = result.get("primary_decision") or {}
+    primary_bounce = result.get("primary_bounce")
+    decision = primary_decision.get("decision") or "UNKNOWN"
+    decision_reason = primary_decision.get("decision_reason")
+    artifacts = result.get("artifacts") or {}
+
+    session_id = job.get("session_id")
+    session = read_session(session_id) if session_id else {}
+    recording = session.get("recording") or {}
+    video_path = session.get("recording_path")
+    clip_url = artifacts.get("clip")
+    clip_path = None
+    if session_id:
+        candidate = job_dir(session_id, job["job_id"]) / "clip.mp4"
+        if candidate.exists():
+            clip_path = str(candidate)
+
+    created_at = now_utc_iso()
+    if request.recorded_at:
+        recorded_at = request.recorded_at.isoformat()
+        recorded_date = request.recorded_date.isoformat() if request.recorded_date else recorded_at[:10]
+    elif request.recorded_date:
+        recorded_date = request.recorded_date.isoformat()
+        recorded_at = f"{recorded_date}T00:00:00"
+    else:
+        recorded_at = created_at
+        recorded_date = recorded_at[:10]
+    return {
+        "id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "job_id": job["job_id"],
+        "created_at": created_at,
+        "recorded_at": recorded_at,
+        "recorded_date": recorded_date,
+        "match_type": request.match_type,
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "video_path": video_path,
+        "video_url": recording.get("url"),
+        "clip_path": clip_path,
+        "clip_url": clip_url,
+        "result_video_url": artifacts.get("result_video"),
+        "inout_overlay_video_url": artifacts.get("inout_overlay_video"),
+        "inout_csv_url": artifacts.get("inout_csv"),
+        "confidence": result.get("confidence"),
+        "primary_bounce_json": encode_json(primary_bounce),
+        "primary_decision_json": encode_json(primary_decision),
+        "job_result_json": encode_json(result),
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return runtime_health()
@@ -910,16 +1044,51 @@ def judge_preprocess(request: JudgePreprocessRequest, background_tasks: Backgrou
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
-    for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
-        return read_json(path)
-    raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
+    return find_job(job_id)
 
 
 @app.get("/jobs/{job_id}/result", response_model=FrontendJobResult)
 def get_job_result(job_id: str) -> FrontendJobResult:
-    for path in OUTPUT_ROOT.glob(f"*/jobs/{job_id}/job.json"):
-        return FrontendJobResult(**build_frontend_job_result(read_json(path)))
-    raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
+    return FrontendJobResult(**build_frontend_job_result(find_job(job_id)))
+
+
+@app.post("/jobs/{job_id}/save", response_model=SavedJudgementDetail)
+def save_job_result(job_id: str, request: SaveJudgementRequest) -> SavedJudgementDetail:
+    job = find_job(job_id)
+    record = insert_judgement_record(build_saved_judgement_record(job, request))
+    return SavedJudgementDetail(**saved_response(record, include_job_result=True))
+
+
+@app.get("/judgements", response_model=list[SavedJudgementResponse])
+def list_saved_judgements(
+    match_type: Literal["singles", "doubles"] | None = None,
+    decision: str | None = None,
+    recorded_date: date | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 50,
+) -> list[SavedJudgementResponse]:
+    limit = max(1, min(limit, 200))
+    records = list_judgement_records(
+        match_type=match_type,
+        decision=decision,
+        recorded_date=recorded_date.isoformat() if recorded_date else None,
+        date_from=date_from.isoformat() if date_from else None,
+        date_to=date_to.isoformat() if date_to else None,
+        limit=limit,
+    )
+    return [
+        SavedJudgementResponse(**saved_response(record, include_job_result=False))
+        for record in records
+    ]
+
+
+@app.get("/judgements/{record_id}", response_model=SavedJudgementDetail)
+def get_saved_judgement(record_id: str) -> SavedJudgementDetail:
+    record = get_judgement_record(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"unknown judgement id: {record_id}")
+    return SavedJudgementDetail(**saved_response(record, include_job_result=True))
 
 
 @app.post("/sessions/{session_id}/save")

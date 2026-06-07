@@ -8,12 +8,27 @@ import cv2
 import numpy as np
 
 
-APRILTAG_DICTIONARY = cv2.aruco.DICT_APRILTAG_36H11
+APRILTAG_FAMILIES = {
+    "4x4_1000": cv2.aruco.DICT_4X4_1000,
+    "aruco_mip_36h12": cv2.aruco.DICT_ARUCO_MIP_36H12,
+    "tag16h5": cv2.aruco.DICT_APRILTAG_16H5,
+    "tag25h9": cv2.aruco.DICT_APRILTAG_25H9,
+    "tag36h10": cv2.aruco.DICT_APRILTAG_36H10,
+    "tag36h11": cv2.aruco.DICT_APRILTAG_36H11,
+}
 MARKER_EDGES = ((0, 1), (1, 2), (2, 3), (3, 0))
 
 
-def tag_dictionary() -> cv2.aruco.Dictionary:
-    return cv2.aruco.getPredefinedDictionary(APRILTAG_DICTIONARY)
+def family_dictionary(family: str) -> int:
+    key = family.lower()
+    if key not in APRILTAG_FAMILIES:
+        known = ", ".join(sorted(APRILTAG_FAMILIES))
+        raise ValueError(f"Unknown AprilTag family {family!r}. Known: {known}")
+    return APRILTAG_FAMILIES[key]
+
+
+def tag_dictionary(family: str = "tag36h11") -> cv2.aruco.Dictionary:
+    return cv2.aruco.getPredefinedDictionary(family_dictionary(family))
 
 
 def read_image_exif(path: Path) -> np.ndarray:
@@ -36,10 +51,10 @@ def rounded_point(point: list[float] | np.ndarray) -> list[float]:
     return [round(float(point[0]), 2), round(float(point[1]), 2)]
 
 
-def detect_apriltags(image: np.ndarray, min_side_px: float) -> list[dict]:
+def detect_apriltags(image: np.ndarray, family: str, min_side_px: float) -> list[dict]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     params = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(tag_dictionary(), params)
+    detector = cv2.aruco.ArucoDetector(tag_dictionary(family), params)
     corners, ids, _ = detector.detectMarkers(gray)
     if ids is None:
         return []
@@ -243,16 +258,21 @@ def build_view2_lines(image_shape: tuple[int, int, int], roles: dict[str, dict])
     return lines
 
 
-def process_image(path: Path, min_side_px: float) -> dict:
+def process_image(path: Path, family: str | float = "tag36h11", min_side_px: float | None = None) -> dict:
+    if min_side_px is None:
+        min_side_px = float(family)
+        family = "tag36h11"
+    family = str(family)
     image = read_image_exif(path)
     height, width = image.shape[:2]
-    markers = detect_apriltags(image, min_side_px)
+    markers = detect_apriltags(image, family, min_side_px)
     roles, view_side = assign_view2_roles(markers)
     lines = build_view2_lines(image.shape, roles)
     return {
         "image": str(path),
         "width": width,
         "height": height,
+        "family": family,
         "view": "view2",
         "view_side": view_side,
         "lines": lines,
@@ -263,11 +283,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Detect AprilTag-guided view2 court-corner lines and export JSON.")
     parser.add_argument("--inputs", nargs="+", required=True)
     parser.add_argument("--out-json", required=True)
+    parser.add_argument("--family", default="tag36h11", choices=sorted(APRILTAG_FAMILIES))
     parser.add_argument("--min-side-px", type=float, default=0.0)
     args = parser.parse_args()
 
     records = [
-        process_image(Path(input_path), args.min_side_px)
+        process_image(Path(input_path), args.family, args.min_side_px)
         for input_path in args.inputs
     ]
     out_json = Path(args.out_json)
