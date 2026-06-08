@@ -173,6 +173,56 @@ def scale_point(point, scale_x, scale_y):
     return float(point[0]) * scale_x, float(point[1]) * scale_y
 
 
+def line_intersection(line_a_start, line_a_end, line_b_start, line_b_end):
+    ax1, ay1 = line_a_start
+    ax2, ay2 = line_a_end
+    bx1, by1 = line_b_start
+    bx2, by2 = line_b_end
+    adx = ax2 - ax1
+    ady = ay2 - ay1
+    bdx = bx2 - bx1
+    bdy = by2 - by1
+    denom = adx * bdy - ady * bdx
+    if abs(denom) < 1e-9:
+        return None
+
+    t = ((bx1 - ax1) * bdy - (by1 - ay1) * bdx) / denom
+    return ax1 + t * adx, ay1 + t * ady
+
+
+def record_view2_vertex(record):
+    for key in ('vertex_point', 'court_vertex', 'view2_vertex_point'):
+        value = record.get(key)
+        if value:
+            return as_point(value)
+    return None
+
+
+def merged_view2_vertex(top_border, top_vertex, side_border, side_vertex, width, height):
+    intersection = line_intersection(top_border, top_vertex, side_border, side_vertex)
+    vertex_gap = math.hypot(top_vertex[0] - side_vertex[0], top_vertex[1] - side_vertex[1])
+    max_distance = max(32.0, vertex_gap * 4.0)
+    padding = max(width, height) * 0.08
+
+    if intersection is not None:
+        ix, iy = intersection
+        inside_padded_frame = (
+            -padding <= ix <= width - 1.0 + padding and
+            -padding <= iy <= height - 1.0 + padding
+        )
+        near_detected_vertex = (
+            math.hypot(ix - top_vertex[0], iy - top_vertex[1]) <= max_distance and
+            math.hypot(ix - side_vertex[0], iy - side_vertex[1]) <= max_distance
+        )
+        if inside_padded_frame and near_detected_vertex:
+            return intersection
+
+    return (
+        (top_vertex[0] + side_vertex[0]) * 0.5,
+        (top_vertex[1] + side_vertex[1]) * 0.5,
+    )
+
+
 def frame_border_intersections(line_start, line_end, width, height):
     x1, y1 = line_start
     x2, y2 = line_end
@@ -307,8 +357,28 @@ def view2_lines_to_polygon_config(record, target_width=None, target_height=None)
     side_border = scale_point(side_border, scale_x, scale_y)
     side_vertex = scale_point(side_vertex, scale_x, scale_y)
 
+    record_vertex = record_view2_vertex(record)
+    if record_vertex is not None:
+        vertex = scale_point(record_vertex, scale_x, scale_y)
+    else:
+        vertex = merged_view2_vertex(
+            top_border,
+            top_vertex,
+            side_border,
+            side_vertex,
+            target_width,
+            target_height,
+        )
+
     polygon = top_boundary_arc(top_border, side_border, target_width, target_height)
-    polygon.extend([side_vertex, top_vertex])
+    polygon.append(vertex)
+
+    source_line_segments = [
+        [[round(top_border[0], 3), round(top_border[1], 3)],
+         [round(vertex[0], 3), round(vertex[1], 3)]],
+        [[round(side_border[0], 3), round(side_border[1], 3)],
+         [round(vertex[0], 3), round(vertex[1], 3)]],
+    ]
 
     return {
         'mode': 'polygon',
@@ -319,6 +389,8 @@ def view2_lines_to_polygon_config(record, target_width=None, target_height=None)
         'source_view_side': record.get('view_side') or record.get('layout', ''),
         'source_size': [width, height],
         'target_size': [target_width, target_height],
+        'view2_vertex_point': [round(vertex[0], 3), round(vertex[1], 3)],
+        'view2_line_segments': source_line_segments,
     }
 
 

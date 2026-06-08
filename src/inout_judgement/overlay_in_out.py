@@ -81,6 +81,17 @@ def scaled_line_segments(record, target_width, target_height):
     return segments
 
 
+def configured_line_segments(config):
+    segments = config.get('view2_line_segments')
+    if not segments:
+        return []
+    return [
+        [as_point(segment[0]), as_point(segment[1])]
+        for segment in segments
+        if len(segment) == 2
+    ]
+
+
 def config_for_video(config_data, args, width, height):
     config_args = SimpleNamespace(
         config_image=args.config_image,
@@ -221,7 +232,7 @@ def write_overlay_video(args):
     record = select_record_for_video(config_data, args, width, height)
     config = config_for_video(config_data, args, width, height)
     polygon = [as_point(point) for point in config['court_polygon']] if config.get('mode') == 'polygon' else []
-    line_segments = scaled_line_segments(record, width, height)
+    line_segments = configured_line_segments(config) or scaled_line_segments(record, width, height)
     if not line_segments and config.get('mode') == 'line':
         line_segments = [[as_point(config['line_start']), as_point(config['line_end'])]]
 

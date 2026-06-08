@@ -167,6 +167,38 @@ def ray_endpoints(
     return [rounded_point(border), rounded_point(anchor_point)]
 
 
+def fitted_line_intersection(first: dict, second: dict) -> np.ndarray | None:
+    p1 = first["point_on_line"].astype(np.float32)
+    d1 = first["direction"].astype(np.float32)
+    p2 = second["point_on_line"].astype(np.float32)
+    d2 = second["direction"].astype(np.float32)
+    denom = float(d1[0] * d2[1] - d1[1] * d2[0])
+    if abs(denom) < 1e-9:
+        return None
+    delta = p2 - p1
+    t = float((delta[0] * d2[1] - delta[1] * d2[0]) / denom)
+    return p1 + d1 * t
+
+
+def shared_vertex_point(vertex_marker: dict, selections: list[dict], image_shape: tuple[int, int, int]) -> np.ndarray:
+    height, width = image_shape[:2]
+    corners = np.array(vertex_marker["corners"], dtype=np.float32)
+    edge_sets = [set(selection["vertex_edge"]) for selection in selections]
+    common = set.intersection(*edge_sets) if edge_sets else set()
+    if len(common) == 1:
+        return corners[next(iter(common))]
+
+    if len(selections) >= 2:
+        intersection = fitted_line_intersection(selections[0], selections[1])
+        if intersection is not None:
+            padding = max(width, height) * 0.08
+            if -padding <= intersection[0] <= width - 1 + padding and -padding <= intersection[1] <= height - 1 + padding:
+                return intersection
+
+    endpoints = [selection["vertex_points"].mean(axis=0) for selection in selections]
+    return np.mean(np.vstack(endpoints), axis=0)
+
+
 def assign_view2_roles(markers: list[dict]) -> tuple[dict[str, dict], str]:
     if len(markers) < 3:
         raise RuntimeError(f"Need at least 3 AprilTags for view2, found {len(markers)}")
@@ -229,31 +261,40 @@ def select_outer_edge_pair(
     return max(viable, key=lambda candidate: candidate["inside_distance"])
 
 
-def build_view2_lines(image_shape: tuple[int, int, int], roles: dict[str, dict]) -> list[dict]:
+def build_view2_lines(image_shape: tuple[int, int, int], roles: dict[str, dict]) -> tuple[list[dict], list[float]]:
     height, width = image_shape[:2]
     specs = [
         ("top_to_vertex", "top_marker", "side_marker"),
         ("side_to_vertex", "side_marker", "top_marker"),
     ]
-    lines: list[dict] = []
+
+    selected_lines = []
     for name, line_role, inside_role in specs:
         line_marker = roles[line_role]
         vertex_marker = roles["vertex"]
         inside_marker = roles[inside_role]
         selected = select_outer_edge_pair(line_marker, vertex_marker, inside_marker)
+        selected_lines.append((name, line_marker, selected))
 
+    vertex_point = shared_vertex_point(
+        roles["vertex"],
+        [selected for _, _, selected in selected_lines],
+        image_shape,
+    )
+
+    lines: list[dict] = []
+    for name, line_marker, selected in selected_lines:
         line_endpoint = selected["line_points"].mean(axis=0)
-        vertex_endpoint = selected["vertex_points"].mean(axis=0)
         border = line_border_intersections(selected["point_on_line"], selected["direction"], width, height)
-        extended = ray_endpoints(border, vertex_endpoint, line_endpoint)
+        extended = ray_endpoints(border, vertex_point, line_endpoint)
 
         lines.append(
             {
                 "name": name,
-                "points": extended or [rounded_point(line_endpoint), rounded_point(vertex_endpoint)],
+                "points": extended or [rounded_point(line_endpoint), rounded_point(vertex_point)],
             }
         )
-    return lines
+    return lines, rounded_point(vertex_point)
 
 
 def process_image(path: Path, family: str = "tag36h11", min_side_px: float = 0.0) -> dict:
@@ -261,7 +302,7 @@ def process_image(path: Path, family: str = "tag36h11", min_side_px: float = 0.0
     height, width = image.shape[:2]
     markers = detect_apriltags(image, min_side_px, family)
     roles, view_side = assign_view2_roles(markers)
-    lines = build_view2_lines(image.shape, roles)
+    lines, vertex_point = build_view2_lines(image.shape, roles)
     return {
         "schema": "apriltag_lines.v1",
         "image": str(path),
@@ -271,6 +312,7 @@ def process_image(path: Path, family: str = "tag36h11", min_side_px: float = 0.0
         "view": "view2",
         "family": family,
         "view_side": view_side,
+        "vertex_point": vertex_point,
         "marker_count": len(markers),
         "markers": markers,
         "lines": lines,
