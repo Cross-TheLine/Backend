@@ -6,3 +6,4 @@ tqdm
 fastapi
 uvicorn[standard]
 python-multipart
+ultralytics
