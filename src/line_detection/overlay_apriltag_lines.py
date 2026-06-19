@@ -15,6 +15,8 @@ CORNER_COLORS = [
     (0, 220, 255),
 ]
 
+DEFAULT_LINE_THICKNESS = 3
+
 
 def read_image_exif(path: Path) -> np.ndarray:
     try:
@@ -193,7 +195,7 @@ def main() -> None:
         action="store_true",
         help="Also draw marker outlines, corner labels, selected edges, and fit points.",
     )
-    parser.add_argument("--line-thickness", type=int, default=6)
+    parser.add_argument("--line-thickness", type=int, default=DEFAULT_LINE_THICKNESS)
     args = parser.parse_args()
 
     line_json = Path(args.line_json)

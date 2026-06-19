@@ -8,6 +8,9 @@ import cv2
 import numpy as np
 
 
+DEFAULT_LINE_THICKNESS = 3
+
+
 def rounded_int_point(point: list[float] | tuple[float, float]) -> tuple[int, int]:
     return tuple(np.round(np.array(point, dtype=np.float32)).astype(int))
 
@@ -88,7 +91,7 @@ def main() -> None:
     parser.add_argument("--line-json", required=True)
     parser.add_argument("--inputs", nargs="+", required=True)
     parser.add_argument("--out-dir", required=True)
-    parser.add_argument("--line-thickness", type=int, default=8)
+    parser.add_argument("--line-thickness", type=int, default=DEFAULT_LINE_THICKNESS)
     parser.add_argument("--color-bgr", default="255,0,0", help="B,G,R line color.")
     args = parser.parse_args()
 

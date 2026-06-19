@@ -24,7 +24,7 @@ from src.api.database import (
     list_judgement_records,
 )
 from src.inout_judgement.judge_in_out import judge_csv, load_json, normalize_config
-from src.inout_judgement.overlay_in_out import write_overlay_video
+from src.inout_judgement.overlay_in_out import DEFAULT_LINE_THICKNESS, write_overlay_video
 from src.line_detection.detect_view2_apriltag_lines import (
     APRILTAG_FAMILIES,
     family_dictionary,
@@ -596,7 +596,7 @@ def run_inout(
             track_csv=track_csv,
             config_image=config_image,
             config_index=config_index,
-            line_thickness=6,
+            line_thickness=DEFAULT_LINE_THICKNESS,
             trace=8,
             bounce_display_window=4,
             hide_track=False,

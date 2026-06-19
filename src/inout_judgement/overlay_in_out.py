@@ -24,6 +24,8 @@ DECISION_COLORS = {
     'UNKNOWN': (0, 220, 255),
 }
 
+DEFAULT_LINE_THICKNESS = 3
+
 
 def read_csv(path):
     with path.open('r', newline='', encoding='utf-8-sig') as csv_file:
@@ -109,7 +111,7 @@ def draw_court_overlay(frame, polygon, line_segments, line_thickness):
         fill = frame.copy()
         cv2.fillPoly(fill, [poly], (0, 120, 0))
         cv2.addWeighted(fill, 0.12, frame, 0.88, 0, frame)
-        cv2.polylines(frame, [poly], True, (0, 180, 0), max(2, line_thickness // 2), cv2.LINE_AA)
+        cv2.polylines(frame, [poly], True, (0, 180, 0), max(1, line_thickness // 2), cv2.LINE_AA)
 
     for start, end in line_segments:
         cv2.line(frame, rounded_point(start), rounded_point(end), (255, 0, 0), line_thickness, cv2.LINE_AA)
@@ -180,7 +182,7 @@ def draw_track(frame, track, frame_index, trace):
             continue
         alpha = 1.0 - offset / max(trace, 1)
         color = (0, int(120 + 120 * alpha), 255)
-        radius = max(3, int(7 - offset * 0.35))
+        radius = max(2, int(5 - offset * 0.28))
         cv2.circle(frame, (int(point['x']), int(point['y'])), radius, color, -1, cv2.LINE_AA)
 
 
@@ -200,9 +202,9 @@ def draw_bounce(frame, bounce):
     color = DECISION_COLORS.get(decision, DECISION_COLORS['UNKNOWN'])
     label = f'{decision} BOUNCE'
 
-    cv2.circle(frame, (x, y), 26, color, 4, cv2.LINE_AA)
-    cv2.circle(frame, (x, y), 5, color, -1, cv2.LINE_AA)
-    draw_text_with_backdrop(frame, label, (max(12, x - 68), max(34, y - 34)), 0.78, color, 2)
+    cv2.circle(frame, (x, y), 22, color, 2, cv2.LINE_AA)
+    cv2.circle(frame, (x, y), 4, color, -1, cv2.LINE_AA)
+    draw_text_with_backdrop(frame, label, (max(12, x - 62), max(34, y - 30)), 0.72, color, 2)
 
 
 def draw_status_banner(frame, bounce_count, visible):
@@ -281,7 +283,7 @@ def parse_args():
     parser.add_argument('--track_csv', type=Path)
     parser.add_argument('--config_image', type=str)
     parser.add_argument('--config_index', type=int, default=0)
-    parser.add_argument('--line_thickness', type=int, default=6)
+    parser.add_argument('--line_thickness', type=int, default=DEFAULT_LINE_THICKNESS)
     parser.add_argument('--trace', type=int, default=8)
     parser.add_argument('--bounce_display_window', type=int, default=4)
     parser.add_argument('--hide_track', action='store_true')
