@@ -284,7 +284,7 @@ def get_model():
     global _model, _model_device
     if _model is None:
         try:
-            from src.bounce_detection.detect_bounces import select_device
+            import torch
             from ultralytics import YOLO
         except ModuleNotFoundError as exc:
             if exc.name == "torch":
@@ -299,7 +299,10 @@ def get_model():
 
         if not DEFAULT_MODEL_PATH.exists():
             raise RuntimeError(f"missing model weights: {DEFAULT_MODEL_PATH}")
-        _model_device = select_device(DEFAULT_DEVICE)
+        if DEFAULT_DEVICE == "auto":
+            _model_device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            _model_device = DEFAULT_DEVICE
         _model = YOLO(str(DEFAULT_MODEL_PATH))
     return _model
 
@@ -412,66 +415,6 @@ def tracking_args(render_video: bool) -> SimpleNamespace:
         hide_track=False,
         render_video=render_video,
     )
-
-
-def choose_yolo_detection(result: Any, class_id: int | None) -> dict[str, float] | None:
-    boxes = getattr(result, "boxes", None)
-    if boxes is None or len(boxes) == 0:
-        return None
-
-    best = None
-    best_confidence = -1.0
-    for box in boxes:
-        detected_class_id = int(box.cls[0].item()) if box.cls is not None else -1
-        if class_id is not None and detected_class_id != class_id:
-            continue
-        confidence = float(box.conf[0].item()) if box.conf is not None else 0.0
-        if confidence <= best_confidence:
-            continue
-        x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
-        best = {
-            "class_id": detected_class_id,
-            "confidence": confidence,
-            "x": (x1 + x2) * 0.5,
-            "y": (y1 + y2) * 0.5,
-            "x1": x1,
-            "y1": y1,
-            "x2": x2,
-            "y2": y2,
-        }
-        best_confidence = confidence
-    return best
-
-
-def track_ball_yolo(
-    frames: list[Any],
-    model: Any,
-    args: SimpleNamespace,
-    device: str,
-) -> tuple[list[tuple[float | None, float | None]], list[str], list[float], int]:
-    track: list[tuple[float | None, float | None]] = []
-    statuses: list[str] = []
-    scores: list[float] = []
-    for frame in frames:
-        result = model.predict(
-            source=frame,
-            conf=args.yolo_conf,
-            iou=args.yolo_iou,
-            imgsz=args.yolo_imgsz,
-            device=device,
-            max_det=args.yolo_max_det,
-            verbose=False,
-        )[0]
-        detection = choose_yolo_detection(result, args.yolo_class_id)
-        if detection is None:
-            track.append((None, None))
-            statuses.append("missing")
-            scores.append(0.0)
-        else:
-            track.append((float(detection["x"]), float(detection["y"])))
-            statuses.append("detected")
-            scores.append(float(detection["confidence"]))
-    return track, statuses, scores, statuses.count("detected")
 
 
 def bounce_payload(row: dict[str, Any], clip_start_sec: float) -> dict[str, Any]:
@@ -631,8 +574,9 @@ def run_preprocess(
     config_index: int = 0,
     render_inout_video: bool = True,
 ) -> dict[str, Any]:
-    from src.ball_tracking.infer_on_video import read_video
-    from src.bounce_detection.detect_bounces_from_track_csv import (
+    from src.ball_tracking.video_io import read_video
+    from src.ball_tracking.yolo_tracker import track_frames_yolo
+    from src.bounce_detection.detect_bounces import (
         detect_y_reversal_bounces,
         write_bounce_csv,
         write_track_csv,
@@ -652,11 +596,15 @@ def run_preprocess(
     args = tracking_args(render_video=render_video)
     model = get_model()
     frame_height, frame_width = frames[0].shape[:2]
-    video_track, statuses, scores, raw_detected = track_ball_yolo(
+    video_track, statuses, scores, raw_detected = track_frames_yolo(
         frames,
         model,
-        args,
-        _model_device or DEFAULT_DEVICE,
+        conf=args.yolo_conf,
+        iou=args.yolo_iou,
+        imgsz=args.yolo_imgsz,
+        device=_model_device or DEFAULT_DEVICE,
+        max_det=args.yolo_max_det,
+        class_id=args.yolo_class_id,
     )
     after_outlier = raw_detected
     bounces = detect_y_reversal_bounces(video_track, fps, args)

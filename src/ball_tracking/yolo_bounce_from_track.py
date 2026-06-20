@@ -2,8 +2,8 @@ import argparse
 import csv
 from pathlib import Path
 
-from src.ball_tracking.infer_on_video import read_video
-from src.bounce_detection.detect_bounces_from_track_csv import (
+from src.ball_tracking.video_io import read_video
+from src.bounce_detection.detect_bounces import (
     detect_y_reversal_bounces,
     write_bounce_csv,
     write_video,
@@ -19,7 +19,7 @@ def load_yolo_track(path: Path) -> tuple[list[tuple[float | None, float | None]]
             status = row.get("status") or "missing"
             if status == "detected" and row.get("x") and row.get("y"):
                 rows.append((float(row["x"]), float(row["y"])))
-                scores.append(float(row.get("confidence") or 0.0))
+                scores.append(float(row.get("confidence") or row.get("score") or 0.0))
                 statuses.append("detected")
             else:
                 rows.append((None, None))

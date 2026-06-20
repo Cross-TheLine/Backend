@@ -1,8 +1,6 @@
 numpy
 opencv-contrib-python-headless
-scipy
 torch
-tqdm
 fastapi
 uvicorn[standard]
 python-multipart

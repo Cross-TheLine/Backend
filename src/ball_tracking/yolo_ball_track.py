@@ -5,6 +5,12 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
+from src.ball_tracking.yolo_tracker import (
+    YOLO_TRACK_FIELDNAMES,
+    detect_ball_yolo,
+    detection_to_track_row,
+)
+
 
 def iter_videos(input_root: Path, pattern: str) -> list[Path]:
     if input_root.is_file():
@@ -24,34 +30,6 @@ def output_dir_for_video(output_root: Path, input_root: Path, video_path: Path) 
     except ValueError:
         relative = Path(video_path.stem)
     return output_root / relative
-
-
-def choose_detection(result, class_id: int | None):
-    boxes = result.boxes
-    if boxes is None or len(boxes) == 0:
-        return None
-
-    best = None
-    best_score = -1.0
-    for box in boxes:
-        cls = int(box.cls[0].item()) if box.cls is not None else -1
-        if class_id is not None and cls != class_id:
-            continue
-        conf = float(box.conf[0].item()) if box.conf is not None else 0.0
-        if conf > best_score:
-            x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
-            best = {
-                "class_id": cls,
-                "confidence": conf,
-                "x1": x1,
-                "y1": y1,
-                "x2": x2,
-                "y2": y2,
-                "x": (x1 + x2) * 0.5,
-                "y": (y1 + y2) * 0.5,
-            }
-            best_score = conf
-    return best
 
 
 def draw_trail(frame, rows, current_index: int, trace: int) -> None:
@@ -99,37 +77,17 @@ def process_video(video_path: Path, input_root: Path, output_root: Path, model: 
         if not ok:
             break
 
-        result = model.predict(
-            source=frame,
+        detection = detect_ball_yolo(
+            frame,
+            model,
             conf=args.conf,
             iou=args.iou,
             imgsz=args.imgsz,
             device=args.device,
             max_det=args.max_det,
-            verbose=False,
-        )[0]
-        detection = choose_detection(result, args.class_id)
-        if detection is None:
-            row = {
-                "frame_index": frame_index,
-                "time_sec": frame_index / fps if fps else 0.0,
-                "status": "missing",
-                "class_id": "",
-                "confidence": "",
-                "x": "",
-                "y": "",
-                "x1": "",
-                "y1": "",
-                "x2": "",
-                "y2": "",
-            }
-        else:
-            row = {
-                "frame_index": frame_index,
-                "time_sec": frame_index / fps if fps else 0.0,
-                "status": "detected",
-                **detection,
-            }
+            class_id=args.class_id,
+        )
+        row = detection_to_track_row(frame_index, fps, detection)
         rows.append(row)
 
         if writer is not None:
@@ -163,27 +121,14 @@ def process_video(video_path: Path, input_root: Path, output_root: Path, model: 
         writer.release()
 
     with track_csv.open("w", newline="", encoding="utf-8-sig") as csv_file:
-        fieldnames = [
-            "frame_index",
-            "time_sec",
-            "status",
-            "class_id",
-            "confidence",
-            "x",
-            "y",
-            "x1",
-            "y1",
-            "x2",
-            "y2",
-        ]
-        csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        csv_writer = csv.DictWriter(csv_file, fieldnames=YOLO_TRACK_FIELDNAMES)
         csv_writer.writeheader()
         for row in rows:
             csv_writer.writerow({
                 key: round(float(row[key]), 4)
                 if key not in {"frame_index", "status", "class_id"} and row[key] != ""
                 else row[key]
-                for key in fieldnames
+                for key in YOLO_TRACK_FIELDNAMES
             })
 
     detected = sum(1 for row in rows if row["status"] == "detected")
