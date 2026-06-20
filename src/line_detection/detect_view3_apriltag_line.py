@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import argparse
-import json
 from itertools import combinations
 from pathlib import Path
 
@@ -11,15 +9,6 @@ import numpy as np
 
 APRILTAG_DICTIONARY = cv2.aruco.DICT_APRILTAG_36H11
 MARKER_EDGES = ((0, 1), (1, 2), (2, 3), (3, 0))
-
-
-def parse_marker_ids(value: str | None) -> list[int] | None:
-    if not value:
-        return None
-    marker_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
-    if len(marker_ids) != 2:
-        raise ValueError("--line-marker-ids needs exactly two comma-separated marker IDs")
-    return marker_ids
 
 
 def tag_dictionary() -> cv2.aruco.Dictionary:
@@ -153,23 +142,6 @@ def line_border_intersections(
     return [[float(best[0][0]), float(best[0][1])], [float(best[1][0]), float(best[1][1])]]
 
 
-def ray_endpoints(
-    border_points: list[list[float]] | None,
-    anchor_point: np.ndarray,
-    through_point: np.ndarray,
-) -> list[list[float]] | None:
-    if border_points is None:
-        return None
-    direction = through_point.astype(np.float32) - anchor_point.astype(np.float32)
-    if float(np.linalg.norm(direction)) < 1e-9:
-        return None
-    border = max(
-        border_points,
-        key=lambda point: float(np.dot(np.array(point, dtype=np.float32) - anchor_point, direction)),
-    )
-    return [rounded_point(border), rounded_point(anchor_point)]
-
-
 def select_view3_roles(
     markers: list[dict],
     line_marker_ids: list[int] | None,
@@ -186,7 +158,7 @@ def select_view3_roles(
         line_pair = (marker_by_id[line_marker_ids[0]], marker_by_id[line_marker_ids[1]])
         inside_candidates = [marker for marker in markers if marker["id"] not in line_marker_ids]
         if not inside_candidates:
-            raise RuntimeError("Need a third marker outside --line-marker-ids to decide the outer edge")
+            raise RuntimeError("Need a third marker outside line_marker_ids to decide the outer edge")
         inside_marker = max(inside_candidates, key=lambda marker: marker["area_px"])
     else:
         best_pair: tuple[dict, dict] | None = None
@@ -304,37 +276,3 @@ def process_image(
         "inside_point": rounded_point(roles["inside_marker"]["center"]),
         "lines": [line],
     }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Detect one screen-vertical AprilTag-guided view3 line and export JSON.")
-    parser.add_argument("--inputs", nargs="+", required=True)
-    parser.add_argument("--out-json", required=True)
-    parser.add_argument("--min-side-px", type=float, default=0.0)
-    parser.add_argument(
-        "--line-marker-ids",
-        default=None,
-        help="Optional two marker IDs that lie on the target line, e.g. 1,2.",
-    )
-    parser.add_argument(
-        "--vertical-weight",
-        type=float,
-        default=30.0,
-        help="Penalty weight for edge candidates that are not screen-vertical.",
-    )
-    args = parser.parse_args()
-
-    line_marker_ids = parse_marker_ids(args.line_marker_ids)
-    records = [
-        process_image(Path(input_path), args.min_side_px, line_marker_ids, args.vertical_weight)
-        for input_path in args.inputs
-    ]
-    out_json = Path(args.out_json)
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    with out_json.open("w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-    print(json.dumps(records, ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    main()

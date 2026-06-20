@@ -46,7 +46,7 @@ weights/tennis_ball_yolo.pt
 - `input/slow_inputs_seg/`: segmented input videos.
 - `input/slow_inputs_unity/`: Unity input videos.
 - `output/`: generated result folders and archives.
-- `src/ball_tracking/`: YOLO ball tracking core, CLI tools, and video helpers.
+- `src/ball_tracking/`: YOLO ball tracking core and video helpers.
 - `src/bounce_detection/`: y-reversal bounce detection from tracked coordinates.
 - `src/inout_judgement/`: in/out judgment and combined overlay helpers.
 - `src/line_detection/`: AprilTag and court-line detection helpers.
@@ -183,19 +183,13 @@ Use this if the app wants backend-managed session records:
 
 ```text
 POST /sessions/start
-POST /sessions/{session_id}/line-status
 POST /sessions/{session_id}/court-config/detect
-POST /sessions/{session_id}/court-config/upload
-POST /sessions/{session_id}/court-config/path
 POST /sessions/{session_id}/record/start
 POST /sessions/{session_id}/record/upload
 POST /sessions/{session_id}/record/path
 POST /sessions/{session_id}/judge
 GET  /jobs/{job_id}
 GET  /jobs/{job_id}/result
-POST /jobs/{job_id}/save
-GET  /judgements
-GET  /judgements/{id}
 POST /sessions/{session_id}/save
 POST /sessions/{session_id}/finish
 ```
@@ -240,7 +234,7 @@ Use this after a job reaches `status=done` and the app needs to save the judged 
 in history.
 
 ```text
-POST /jobs/{job_id}/save
+POST /sessions/{session_id}/save
 ```
 
 Request:
@@ -264,152 +258,13 @@ The saved SQLite record includes:
 - primary IN/OUT decision and reason
 - primary bounce and full job result JSON
 
-Query saved records:
-
-```text
-GET /judgements
-GET /judgements?match_type=singles
-GET /judgements?decision=OUT
-GET /judgements?recorded_date=2026-06-07
-GET /judgements?date_from=2026-06-01&date_to=2026-06-07
-GET /judgements/{id}
-```
-
-For compatibility, `POST /sessions/{session_id}/save` also saves the latest completed
-job in that session when given the same request body plus optional `job_id`.
+`POST /sessions/{session_id}/save` saves the latest completed job in that
+session. You can pass an optional `job_id` to save a specific completed job.
 
 Records are stored in:
 
 ```text
 output/judgements.sqlite3
-```
-
-## CLI Pipeline
-
-전체 CLI 흐름은 아래 순서입니다.
-
-```text
-video/image
--> line detection input frame
--> view2 or view3 line JSON
--> bounce detection CSV
--> in/out judgment CSV
--> combined overlay video
-```
-
-영상 자르기는 기본 line/bounce/inout 코드 안에 넣지 않았습니다. 영상이면 먼저 한 프레임을 이미지로 뽑고, 사진이면 그 사진을 바로 line detection에 넣으면 됩니다.
-
-## Main CLI Files
-
-- `src/inout_judgement/extract_video_frame.py`: 영상에서 라인 인식용 프레임 1장 추출
-- `src/line_detection/detect_view2_apriltag_lines.py`: view2 AprilTag 라인 JSON 생성
-- `src/line_detection/detect_view3_apriltag_line.py`: view3 AprilTag 라인 JSON 생성
-- `src/line_detection/overlay_apriltag_lines.py`: 라인 인식 결과 이미지 overlay 생성
-- `src/ball_tracking/yolo_ball_track.py`: YOLO 공 추적 CSV와 overlay 생성
-- `src/ball_tracking/yolo_bounce_from_track.py`: YOLO track CSV에서 y-reversal bounce detect
-- `src/inout_judgement/judge_in_out.py`: bounce CSV와 line JSON으로 `IN` / `OUT` 판정
-- `src/inout_judgement/overlay_in_out.py`: 라인, 공 궤적, bounce, in/out 결과를 영상에 합쳐서 그림
-
-## 1. Extract A Frame From Video
-
-영상 입력이면 초반 프레임을 이미지로 추출합니다.
-
-```powershell
-python -m src.inout_judgement.extract_video_frame --videos .\xyLine\yball\mid.mov --out-dir .\outputs\xyline_yball_frames --frame-index 0
-```
-
-출력 예:
-
-```text
-outputs/xyline_yball_frames/mid_frame0.png
-```
-
-이미 사진 파일이 있으면 이 단계는 건너뛰고, 그 사진을 다음 단계 `--inputs`에 넣으면 됩니다.
-
-## 2. Detect View2 Lines
-
-추출한 프레임이나 사진에서 AprilTag 3개를 찾아 view2 라인 JSON을 만듭니다.
-
-```powershell
-python -m src.line_detection.detect_view2_apriltag_lines --inputs .\outputs\xyline_yball_frames\mid_frame0.png --out-json .\outputs\xyline_yball_view2_lines.json
-```
-
-라인이 잘 잡혔는지 확인하고 싶으면 overlay 이미지를 만듭니다.
-
-```powershell
-python -m src.line_detection.overlay_apriltag_lines --line-json .\outputs\xyline_yball_view2_lines.json --out-dir .\outputs\xyline_yball_view2_overlay --line-thickness 6
-```
-
-## 3. Detect Bounces
-
-영상에서 공을 추적하고 y축 방향 반전으로 bounce를 찾습니다.
-
-```powershell
-python -m src.ball_tracking.yolo_ball_track --input-root .\xyLine\yball\mid.mov --output-root .\outputs\xyline_yball_tracks --device cpu
-python -m src.ball_tracking.yolo_bounce_from_track --track-root .\outputs\xyline_yball_tracks --input-root .\xyLine\yball --output-root .\outputs\xyline_yball_bounces
-```
-
-GPU 환경이면 CUDA PyTorch 설치 후 첫 번째 명령에서 `--device cuda`를 사용합니다.
-
-출력:
-
-```text
-outputs/xyline_yball_tracks/mid/mid_yolo_track.csv
-outputs/xyline_yball_tracks/mid/mid_yolo_track.avi
-outputs/xyline_yball_bounces/mid/mid_yolo_bounces.csv
-outputs/xyline_yball_bounces/mid/mid_yolo_bounces.avi
-```
-
-`mid_yolo_bounces.csv`의 `x`, `y`는 bounce 판정에 사용할 픽셀 좌표입니다.
-
-## 4. Judge In/Out
-
-view2 line JSON으로 코트 안쪽 polygon을 만들고, bounce 좌표가 그 안에 있으면 `IN`, 밖이면 `OUT`으로 판정합니다.
-view3 line JSON은 한 개의 끝-끝 라인과 `view_side`/`inside_point`를 사용해 안쪽 half-plane polygon을 만든 뒤 같은 방식으로 판정합니다.
-
-```powershell
-python -m src.inout_judgement.judge_in_out --input .\outputs\xyline_yball_bounces\mid\mid_yolo_bounces.csv --court_config .\outputs\xyline_yball_view2_lines.json --output_root .\outputs\xyline_yball_inout --x_column x --y_column y --config_image mid_frame0.png
-```
-
-출력:
-
-```text
-outputs/xyline_yball_inout/mid_yolo_bounces_judged.csv
-```
-
-중요 컬럼:
-
-- `decision`: `IN`, `OUT`, `UNKNOWN`
-- `decision_reason`: `inside_polygon`, `outside_polygon`, `on_line`
-- `boundary_distance_px`: 라인/polygon 경계와의 픽셀 거리
-
-참고: YOLO bounce 결과는 좌표 컬럼이 `x/y`라서 `--x_column x --y_column y`가 필요합니다. `contact_x/contact_y`가 있는 CSV는 이 옵션을 빼도 됩니다.
-
-## 5. Draw Combined Overlay
-
-라인, 공 track, bounce 위치, `IN/OUT` 라벨을 원본 영상 위에 같이 그립니다.
-
-```powershell
-python -m src.inout_judgement.overlay_in_out --video_path .\xyLine\yball\mid.mov --court_config .\outputs\xyline_yball_view2_lines.json --judged_csv .\outputs\xyline_yball_inout\mid_yolo_bounces_judged.csv --track_csv .\outputs\xyline_yball_tracks\mid\mid_yolo_track.csv --output_path .\outputs\xyline_yball_combined_overlay\mid_combined_inout.avi --config_image mid_frame0.png
-```
-
-출력:
-
-```text
-outputs/xyline_yball_combined_overlay/mid_combined_inout.avi
-```
-
-bounce가 없으면 영상에는 `NO BOUNCE`로 표시됩니다.
-
-## Quick Example: xball in.mov
-
-```powershell
-python -m src.inout_judgement.extract_video_frame --videos .\xyLine\xball\in.mov --out-dir .\outputs\xyline_xball_frames --frame-index 0
-python -m src.line_detection.detect_view2_apriltag_lines --inputs .\outputs\xyline_xball_frames\in_frame0.png --out-json .\outputs\xyline_xball_view2_lines.json
-python -m src.ball_tracking.yolo_ball_track --input-root .\xyLine\xball\in.mov --output-root .\outputs\xyline_xball_tracks --device cpu
-python -m src.ball_tracking.yolo_bounce_from_track --track-root .\outputs\xyline_xball_tracks --input-root .\xyLine\xball --output-root .\outputs\xyline_xball_bounces
-python -m src.inout_judgement.judge_in_out --input .\outputs\xyline_xball_bounces\in\in_yolo_bounces.csv --court_config .\outputs\xyline_xball_view2_lines.json --output_root .\outputs\xyline_xball_inout --x_column x --y_column y --config_image in_frame0.png
-python -m src.inout_judgement.overlay_in_out --video_path .\xyLine\xball\in.mov --court_config .\outputs\xyline_xball_view2_lines.json --judged_csv .\outputs\xyline_xball_inout\in_yolo_bounces_judged.csv --track_csv .\outputs\xyline_xball_tracks\in\in_yolo_track.csv --output_path .\outputs\xyline_xball_combined_overlay\in_combined_inout.avi --config_image in_frame0.png
 ```
 
 ## Notes

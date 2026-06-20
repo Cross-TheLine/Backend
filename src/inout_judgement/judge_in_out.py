@@ -1,4 +1,3 @@
-import argparse
 import csv
 import json
 import math
@@ -608,63 +607,3 @@ def judge_csv(input_csv, output_csv, config, x_column, y_column):
     write_csv(output_csv, output_rows, fieldnames)
     return len(output_rows)
 
-
-def iter_bounce_csvs(input_path):
-    if input_path.is_file():
-        return [input_path]
-    return sorted(input_path.rglob('*_bounces.csv'))
-
-
-def output_path_for(input_csv, input_root, output_root):
-    if input_root.is_file():
-        return output_root / f'{input_csv.stem}_judged.csv'
-    rel_path = input_csv.relative_to(input_root)
-    return output_root / rel_path.parent / f'{input_csv.stem}_judged.csv'
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input', type=Path, required=True,
-                        help='bounce CSV file or folder containing *_bounces.csv')
-    parser.add_argument('--court_config', type=Path, required=True,
-                        help='JSON config describing court polygon or in/out line')
-    parser.add_argument('--output_root', type=Path, default=Path('output_inout'))
-    parser.add_argument('--x_column', type=str, default='contact_x')
-    parser.add_argument('--y_column', type=str, default='contact_y')
-    parser.add_argument('--config_image', type=str,
-                        help='image name to select when court_config contains multiple view2 records')
-    parser.add_argument('--config_index', type=int, default=0,
-                        help='record index to select when court_config contains multiple view2 records')
-    parser.add_argument('--target_width', type=float,
-                        help='scale view2 line coordinates to this frame width')
-    parser.add_argument('--target_height', type=float,
-                        help='scale view2 line coordinates to this frame height')
-    parser.add_argument('--video_path', type=Path,
-                        help='video used to infer target width/height for view2 line configs')
-    args = parser.parse_args()
-
-    config = normalize_config(load_json(args.court_config), args)
-    if config.get('source_mode') in {'view2_lines', 'view3_lines'}:
-        print(
-            'court_config={} image={} source_size={} target_size={}'.format(
-                config.get('source_mode', ''),
-                config.get('source_image', ''),
-                config.get('source_size', ''),
-                config.get('target_size', ''),
-            )
-        )
-    csv_paths = iter_bounce_csvs(args.input)
-    args.output_root.mkdir(parents=True, exist_ok=True)
-
-    processed = 0
-    for csv_path in csv_paths:
-        out_path = output_path_for(csv_path, args.input, args.output_root)
-        count = judge_csv(csv_path, out_path, config, args.x_column, args.y_column)
-        processed += 1
-        print(f'{csv_path} -> {out_path} ({count} rows)')
-
-    print(f'processed={processed}')
-
-
-if __name__ == '__main__':
-    main()

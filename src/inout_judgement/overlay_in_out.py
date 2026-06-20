@@ -1,7 +1,5 @@
-import argparse
 import csv
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
@@ -270,40 +268,3 @@ def write_overlay_video(args):
     cap.release()
     writer.release()
     return frame_index, len(bounces), width, height, fps
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Draw line, bounce, and IN/OUT judgment overlays on a video.'
-    )
-    parser.add_argument('--video_path', type=Path, required=True)
-    parser.add_argument('--court_config', type=Path, required=True)
-    parser.add_argument('--judged_csv', type=Path, required=True)
-    parser.add_argument('--output_path', type=Path, required=True)
-    parser.add_argument('--track_csv', type=Path)
-    parser.add_argument('--config_image', type=str)
-    parser.add_argument('--config_index', type=int, default=0)
-    parser.add_argument('--line_thickness', type=int, default=DEFAULT_LINE_THICKNESS)
-    parser.add_argument('--trace', type=int, default=8)
-    parser.add_argument('--bounce_display_window', type=int, default=4)
-    parser.add_argument('--hide_track', action='store_true')
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-    frames, bounce_count, width, height, fps = write_overlay_video(args)
-    print(
-        'output={} frames={} bounces={} fps={:.3f} size={}x{}'.format(
-            args.output_path,
-            frames,
-            bounce_count,
-            fps,
-            width,
-            height,
-        )
-    )
-
-
-if __name__ == '__main__':
-    main()

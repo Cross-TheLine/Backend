@@ -18,16 +18,13 @@ from pydantic import BaseModel, Field
 
 from src.api.database import (
     encode_json,
-    get_judgement_record,
     init_db,
     insert_judgement_record,
-    list_judgement_records,
 )
 from src.inout_judgement.judge_in_out import judge_csv, load_json, normalize_config
 from src.inout_judgement.overlay_in_out import DEFAULT_LINE_THICKNESS, write_overlay_video
 from src.line_detection.detect_view2_apriltag_lines import (
     APRILTAG_FAMILIES,
-    family_dictionary,
     process_image as detect_view2_court_config,
     read_image_exif,
 )
@@ -73,12 +70,6 @@ class SessionResponse(BaseModel):
 
 class RecordPathRequest(BaseModel):
     path: str
-
-
-class CourtConfigPathRequest(BaseModel):
-    path: str
-    config_image: str | None = None
-    config_index: int = 0
 
 
 class SaveJudgementRequest(BaseModel):
@@ -981,49 +972,6 @@ def get_session(session_id: str) -> dict[str, Any]:
 
 
 @app.post(
-    "/sessions/{session_id}/line-status",
-    tags=["라인 인식"],
-    summary="라인 안정화 체크",
-)
-def line_status(
-    session_id: str,
-    frame: UploadFile = File(...),
-    family: str = "tag36h11",
-) -> dict[str, Any]:
-    if family not in APRILTAG_FAMILIES:
-        raise HTTPException(status_code=400, detail=f"unknown family: {family}")
-    session = read_session(session_id)
-    frame_path = session_dir(session_id) / "line_checks" / f"{uuid.uuid4()}.jpg"
-    save_upload(frame, frame_path)
-
-    try:
-        image = read_image_exif(frame_path)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=400, detail="could not read uploaded frame")
-    if image is None:
-        raise HTTPException(status_code=400, detail="could not read uploaded frame")
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    dictionary = cv2.aruco.getPredefinedDictionary(family_dictionary(family))
-    detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
-    _, ids, rejected = detector.detectMarkers(gray)
-    marker_count = 0 if ids is None else len(ids)
-    rejected_count = 0 if rejected is None else len(rejected)
-    ready = marker_count >= 3
-    response = {
-        "ready": ready,
-        "line_visible": ready,
-        "marker_visible": marker_count > 0,
-        "marker_count": marker_count,
-        "rejected_count": rejected_count,
-        "confidence": min(1.0, marker_count / 3.0),
-        "frame": relative_file_url(frame_path),
-    }
-    session["last_line_status"] = response
-    write_session(session)
-    return response
-
-
-@app.post(
     "/sessions/{session_id}/court-config/detect",
     tags=["라인 인식"],
     summary="라인 JSON 자동 생성",
@@ -1079,65 +1027,6 @@ def detect_court_config(
         "frame": relative_file_url(frame_path),
         "court_config": court_config,
         "summary": session["court_config_detection"],
-    }
-
-
-@app.post(
-    "/sessions/{session_id}/court-config/upload",
-    tags=["라인 인식"],
-    summary="라인 JSON 업로드",
-)
-def upload_court_config(
-    session_id: str,
-    config: UploadFile = File(...),
-    config_image: str | None = None,
-    config_index: int = 0,
-) -> dict[str, Any]:
-    session = read_session(session_id)
-    suffix = Path(config.filename or "court_config.json").suffix or ".json"
-    config_path = session_dir(session_id) / f"court_config{suffix}"
-    save_upload(config, config_path)
-    try:
-        load_json(config_path)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"invalid court config JSON: {exc}") from exc
-    resolved_config_path = config_path.resolve()
-    session["court_config_path"] = str(resolved_config_path)
-    session["config_image"] = config_image
-    session["config_index"] = config_index
-    write_session(session)
-    return {
-        "session_id": session_id,
-        "court_config_path": str(resolved_config_path),
-        "config_image": config_image,
-        "config_index": config_index,
-        "url": relative_file_url(config_path),
-    }
-
-
-@app.post(
-    "/sessions/{session_id}/court-config/path",
-    tags=["라인 인식"],
-    summary="라인 JSON 경로 등록",
-)
-def set_court_config_path(session_id: str, request: CourtConfigPathRequest) -> dict[str, Any]:
-    session = read_session(session_id)
-    config_path = Path(request.path).resolve()
-    if not config_path.exists():
-        raise HTTPException(status_code=404, detail=f"court config not found: {config_path}")
-    try:
-        load_json(config_path)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"invalid court config JSON: {exc}") from exc
-    session["court_config_path"] = str(config_path)
-    session["config_image"] = request.config_image
-    session["config_index"] = request.config_index
-    write_session(session)
-    return {
-        "session_id": session_id,
-        "court_config_path": str(config_path),
-        "config_image": request.config_image,
-        "config_index": request.config_index,
     }
 
 
@@ -1304,60 +1193,6 @@ def get_job(job_id: str) -> dict[str, Any]:
 )
 def get_job_result(job_id: str) -> FrontendJobResult:
     return FrontendJobResult(**build_frontend_job_result(find_job(job_id)))
-
-
-@app.post(
-    "/jobs/{job_id}/save",
-    response_model=SavedJudgementDetail,
-    tags=["저장"],
-    summary="Job 판정 결과 저장",
-)
-def save_job_result(job_id: str, request: SaveJudgementRequest) -> SavedJudgementDetail:
-    job = find_job(job_id)
-    record = insert_judgement_record(build_saved_judgement_record(job, request))
-    return SavedJudgementDetail(**saved_response(record, include_job_result=True))
-
-
-@app.get(
-    "/judgements",
-    response_model=list[SavedJudgementResponse],
-    tags=["저장"],
-    summary="저장된 판정 목록 조회",
-)
-def list_saved_judgements(
-    match_type: Literal["singles", "doubles"] | None = None,
-    decision: str | None = None,
-    recorded_date: date | None = None,
-    date_from: date | None = None,
-    date_to: date | None = None,
-    limit: int = 50,
-) -> list[SavedJudgementResponse]:
-    limit = max(1, min(limit, 200))
-    records = list_judgement_records(
-        match_type=match_type,
-        decision=decision.upper() if decision else None,
-        recorded_date=recorded_date.isoformat() if recorded_date else None,
-        date_from=date_from.isoformat() if date_from else None,
-        date_to=date_to.isoformat() if date_to else None,
-        limit=limit,
-    )
-    return [
-        SavedJudgementResponse(**saved_response(record, include_job_result=False))
-        for record in records
-    ]
-
-
-@app.get(
-    "/judgements/{record_id}",
-    response_model=SavedJudgementDetail,
-    tags=["저장"],
-    summary="저장된 판정 상세 조회",
-)
-def get_saved_judgement(record_id: str) -> SavedJudgementDetail:
-    record = get_judgement_record(record_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"unknown judgement id: {record_id}")
-    return SavedJudgementDetail(**saved_response(record, include_job_result=True))
 
 
 @app.post(

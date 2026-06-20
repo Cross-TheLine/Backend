@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import argparse
-import json
 from pathlib import Path
 
 import cv2
@@ -318,25 +316,3 @@ def process_image(path: Path, family: str = "tag36h11", min_side_px: float = 0.0
         "lines": lines,
     }
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Detect AprilTag-guided view2 court-corner lines and export JSON.")
-    parser.add_argument("--inputs", nargs="+", required=True)
-    parser.add_argument("--out-json", required=True)
-    parser.add_argument("--family", default="tag36h11", choices=sorted(APRILTAG_FAMILIES))
-    parser.add_argument("--min-side-px", type=float, default=0.0)
-    args = parser.parse_args()
-
-    records = [
-        process_image(Path(input_path), family=args.family, min_side_px=args.min_side_px)
-        for input_path in args.inputs
-    ]
-    out_json = Path(args.out_json)
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    with out_json.open("w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-    print(json.dumps(records, ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    main()
