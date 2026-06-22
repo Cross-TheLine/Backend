@@ -29,11 +29,14 @@ pip install -r requirements.txt
 conda run -n tennis-env python -m <module> ...
 ```
 
-If you use an NVIDIA GPU, replace the default PyTorch install with the CUDA wheel:
+NVIDIA GPU를 사용한다면 OS, Python 버전, GPU 드라이버 및 지원 CUDA 버전에 맞는
+PyTorch wheel을 설치하세요. 예를 들어 CUDA 12.8 환경에서는 다음 명령을 사용할 수 있습니다.
 
 ```powershell
 pip install --upgrade --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
+
+CUDA wheel을 선택하기 전에 [PyTorch 공식 설치 안내](https://pytorch.org/get-started/locally/)를 확인하세요.
 
 필요한 모델 파일:
 
@@ -43,14 +46,16 @@ weights/tennis_ball_yolo.pt
 
 ## Folders
 
-- `input/slow_inputs_seg/`: segmented input videos.
-- `input/slow_inputs_unity/`: Unity input videos.
-- `output/`: generated result folders and archives.
+- `input/slow_inputs_seg/`: segmented input videos (필요할 때 로컬에서 생성).
+- `input/slow_inputs_unity/`: Unity input videos (필요할 때 로컬에서 생성).
+- `output/`: generated result folders and archives (실행 중 자동 생성).
 - `src/ball_tracking/`: YOLO ball tracking core and video helpers.
 - `src/bounce_detection/`: y-reversal bounce detection from tracked coordinates.
 - `src/inout_judgement/`: in/out judgment and combined overlay helpers.
 - `src/line_detection/`: AprilTag and court-line detection helpers.
 - `src/api/`: FastAPI server.
+
+`input/`, `output/`, `weights/` 디렉터리는 `.gitignore` 대상이므로 새로 clone한 저장소에는 포함되지 않습니다.
 
 ## Run API Server
 
@@ -74,7 +79,7 @@ GET /health
 
 ## MVP App Flow
 
-Use this if the app already records a full video file and sends the button press time:
+백엔드가 로컬 파일시스템 경로를 통해 전체 녹화 영상에 접근할 수 있고, 앱에서 버튼 입력 시각을 전달하는 경우 사용합니다.
 
 ```text
 POST /judge-preprocess
@@ -83,6 +88,9 @@ GET  /jobs/{job_id}/result
 ```
 
 Request:
+
+`recording_path`와 `court_config_path`는 모두 백엔드 서버의 로컬 경로입니다.
+클라이언트 기기의 경로가 아니며, 이 엔드포인트는 파일을 업로드하지 않습니다.
 
 ```json
 {
@@ -97,24 +105,22 @@ Request:
 }
 ```
 
-If the app stops recording when the user presses the judgment button, omit
-`pressed_at_sec` or set `use_video_end=true`. The backend reads `video_duration_sec`
-from the uploaded video and judges the last `lookback_sec` seconds:
+앱이 판정 버튼을 누를 때 녹화를 중지한다면 `pressed_at_sec`을 생략하거나
+`use_video_end=true`로 설정합니다. 백엔드는 영상의 `video_duration_sec`을 읽고
+마지막 `lookback_sec` 구간을 판정합니다.
 
 ```text
 pressed_at_sec = video_duration_sec - end_offset_sec
 clip_start_sec = max(0, pressed_at_sec - lookback_sec)
 ```
 
-With the default `lookback_sec=5.0`, videos shorter than 5 seconds are judged from
-the beginning of the uploaded video.
+기본 `lookback_sec=5.0`에서 5초보다 짧은 영상은 영상 시작부터 판정합니다.
 
-Use `end_offset_sec` only if the app keeps recording briefly after the button press.
-For example, if recording stops 0.5 seconds after the press, send
-`"end_offset_sec": 0.5`.
+앱이 버튼 입력 이후에도 잠시 녹화하는 경우에만 `end_offset_sec`을 사용합니다.
+예를 들어 입력 후 0.5초 뒤 녹화가 종료된다면 `"end_offset_sec": 0.5`를 전달합니다.
 
-For manually synchronized clients, `pressed_at_sec` is still supported. If it exceeds
-the uploaded video duration, the backend clamps it to the video end.
+직접 시간을 동기화하는 클라이언트는 `pressed_at_sec`을 사용할 수 있습니다.
+영상 길이를 초과하면 백엔드가 영상 끝 시각으로 제한합니다.
 
 Initial response:
 
@@ -125,7 +131,8 @@ Initial response:
 }
 ```
 
-Poll `GET /jobs/{job_id}` until `status` is `done`, or use `GET /jobs/{job_id}/result` for the frontend-stable response shape.
+`GET /jobs/{job_id}`를 `status`가 `done` 또는 `failed`가 될 때까지 polling하거나,
+프론트엔드용 고정 응답 구조가 필요하면 `GET /jobs/{job_id}/result`를 사용합니다.
 
 Frontend result response:
 
@@ -141,7 +148,7 @@ Frontend result response:
   "failure_reason": null,
   "video_readable": true,
   "recording_accessible": true,
-  "confidence": 0.8,
+  "confidence": 0.328,
   "primary_bounce": {
     "frame_index": 38,
     "clip_time_sec": 1.267,
@@ -175,11 +182,13 @@ Frontend result response:
 }
 ```
 
-If `court_config_path` is omitted, the job still returns ball tracking and bounce detection only.
+`POST /judge-preprocess`에서 `court_config_path`를 생략하면 IN/OUT 판정 없이 공 추적과
+바운스 검출만 실행합니다. 세션 기반 흐름에서는 경로를 생략할 경우 해당 세션에 저장된
+court config를 사용합니다.
 
 ## Session-Based Flow
 
-Use this if the app wants backend-managed session records:
+백엔드가 세션 기록을 관리해야 할 때 사용합니다.
 
 ```text
 POST /sessions/start
@@ -200,7 +209,7 @@ Generated files are stored under:
 output/api_sessions/{session_id}/jobs/{job_id}/
 ```
 
-Each job writes:
+모든 job은 `job.json`을 생성합니다. 처리가 성공한 job은 다음 파일도 생성합니다.
 
 - `clip.mp4`
 - `track.csv`
@@ -208,11 +217,14 @@ Each job writes:
 - `result.avi` when `render_video` is true
 - `inout_judged.csv` when a court config is supplied
 - `inout_overlay.avi` when a court config is supplied and `render_inout_video` is true
-- `job.json`
+
+실패한 job은 실패 지점에 따라 `job.json`만 생성되거나 일부 산출물만 생성될 수 있습니다.
 
 ### Auto-detect court config from a frame
 
-Use this when the app has a still frame where the AprilTags are visible:
+지원되는 view2 마커 배치가 포함된 정지 프레임이 있을 때 사용합니다. 감지에는 최소 3개의
+AprilTag가 보여야 하며, 감지된 태그 중 가장 큰 3개를 기준으로 두 코트 경계선을 추정합니다.
+일반적인 코트 라인 검출 기능은 아닙니다.
 
 ```text
 POST /sessions/{session_id}/court-config/detect
@@ -223,15 +235,14 @@ query params:
   min_side_px=0
 ```
 
-The backend saves the uploaded frame, detects AprilTag-guided view2 court lines, writes
-`court_config_detected.json`, and stores that path on the session. Later
-`POST /sessions/{session_id}/judge` automatically uses that detected config unless the
-judge request overrides `court_config_path`.
+백엔드는 업로드된 프레임을 저장하고 AprilTag 기반 view2 코트 라인을 감지한 다음
+`court_config_detected.json`을 생성하여 세션에 경로를 저장합니다.
+이후 `POST /sessions/{session_id}/judge`는 요청에서 `court_config_path`를 재정의하지 않는 한
+세션에 저장된 설정을 자동으로 사용합니다.
 
 ### Save judgment records
 
-Use this after a job reaches `status=done` and the app needs to save the judged result
-in history.
+job이 `status=done`에 도달한 뒤 판정 결과를 기록에 저장할 때 사용합니다.
 
 ```text
 POST /sessions/{session_id}/save
@@ -247,19 +258,19 @@ Request:
 }
 ```
 
-`match_type` must be `singles` or `doubles`. If `recorded_at` is omitted, the backend
-uses the session `recorded_at` first and falls back to the save time.
+`match_type`은 `singles` 또는 `doubles`여야 합니다. `recorded_at`을 생략하면 백엔드는
+세션의 `recorded_at`을 먼저 사용하고, 값이 없으면 저장 시각을 사용합니다.
 
 The saved SQLite record includes:
 
-- original uploaded video path and `/files` URL
+- original recording path and, for videos received through `record/upload`, a `/files` URL
 - judgment clip and overlay URLs
 - match type: singles or doubles
 - primary IN/OUT decision and reason
 - primary bounce and full job result JSON
 
-`POST /sessions/{session_id}/save` saves the latest completed job in that
-session. You can pass an optional `job_id` to save a specific completed job.
+`POST /sessions/{session_id}/save`는 세션에서 최근 완료된 job을 저장합니다.
+완료된 특정 job을 저장하려면 선택적 `job_id`를 전달할 수 있습니다.
 
 Records are stored in:
 
