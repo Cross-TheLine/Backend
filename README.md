@@ -284,3 +284,9 @@ output/judgements.sqlite3
 - in/out도 같은 픽셀 좌표계에서 line JSON polygon 안/밖을 봅니다.
 - 정확한 실제 코트 좌표, 거리, cm 단위 margin이 필요하면 별도 homography 단계가 필요할 수 있습니다.
 - 라인 근처 판정은 ball center/contact point 오차 영향을 받을 수 있습니다.
+
+
+## 기여자 및 TrackNet 관련 안내
+
+이 저장소는 초기 개발 과정에서 TrackNet 저장소를 기반으로 구성되었기 때문에 GitHub 기여자 기록에 TrackNet 원본 기여자가 표시될 수 있습니다.
+현재 구현에서는 TrackNet 모델과 추론 파이프라인을 더 이상 사용하지 않습니다. 공 추적은 `src/ball_tracking/`의 YOLO 기반 구현을 사용합니다.
